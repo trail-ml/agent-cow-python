@@ -1,0 +1,35 @@
+{
+  "name": "@agent-cow/pg-lite",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "description": "Copy-on-Write isolation for agentic database operations, built on PGlite",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.3.15"
+  },
+  "devDependencies": {
+    "tsup": "^8.4.0",
+    "typescript": "~5.9.3"
+  },
+  "peerDependencies": {
+    "@electric-sql/pglite": ">=0.3.0"
+  }
+}
