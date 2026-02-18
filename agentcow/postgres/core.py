@@ -8,14 +8,13 @@ All functions accept a generic ``Executor`` — no ORM or driver dependency.
 import uuid
 from typing import Any, Protocol, runtime_checkable
 
-from .sql_functions import (
+from .cow_sql_functions import (
+    COW_CHANGES_TABLE_NAME_SQL,
     SETUP_COW_SQL,
     COMMIT_COW_SQL,
     DISCARD_COW_SQL,
     TEARDOWN_COW_SQL,
     GET_COW_DEPENDENCIES_SQL,
-    COMMIT_COW_OPERATIONS_SQL,
-    DISCARD_COW_OPERATIONS_SQL,
     GET_SESSION_OPERATIONS_SQL,
 )
 from .operations import (
@@ -92,13 +91,12 @@ async def _get_pk_cols(executor: Executor, schema: str, table_name: str) -> list
 async def deploy_cow_functions(executor: Executor) -> None:
     """Deploy the required PL/pgSQL helper functions to the database."""
     for sql in (
+        COW_CHANGES_TABLE_NAME_SQL,
         SETUP_COW_SQL,
         COMMIT_COW_SQL,
         DISCARD_COW_SQL,
         TEARDOWN_COW_SQL,
         GET_COW_DEPENDENCIES_SQL,
-        COMMIT_COW_OPERATIONS_SQL,
-        DISCARD_COW_OPERATIONS_SQL,
         GET_SESSION_OPERATIONS_SQL,
     ):
         await executor.execute(sql)

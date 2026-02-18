@@ -266,7 +266,7 @@ def commit_cow_operations_sql(
 ) -> str:
     """SQL to commit specific operations from a COW session to the base table."""
     return (
-        f"SELECT commit_cow_operations("
+        f"SELECT commit_cow("
         f"{_quote_literal(schema)}, "
         f"{_quote_literal(base_table)}, "
         f"{_to_text_array(pk_cols)}, "
@@ -283,7 +283,7 @@ def discard_cow_operations_sql(
 ) -> str:
     """SQL to discard specific operations from a COW session."""
     return (
-        f"SELECT discard_cow_operations("
+        f"SELECT discard_cow("
         f"{_quote_literal(schema)}, "
         f"{_quote_literal(base_table)}, "
         f"{_to_uuid(session_id)}, "
