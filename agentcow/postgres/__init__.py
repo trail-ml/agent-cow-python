@@ -22,7 +22,6 @@ from .core import (
 )
 from .session import (
     CowRequestConfig,
-    parse_cow_headers_from_request,
     build_cow_variable_statements,
 )
 
@@ -46,6 +45,5 @@ __all__ = [
     "is_cow_enabled",
     "get_cow_status",
     "CowRequestConfig",
-    "parse_cow_headers_from_request",
     "build_cow_variable_statements",
 ]
