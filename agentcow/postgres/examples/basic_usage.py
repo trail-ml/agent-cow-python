@@ -20,7 +20,7 @@ from sqlalchemy import Column, Integer, String, text, select
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-from agent_cow.postgres.core import (
+from agentcow.postgres.core import (
     Executor,
     deploy_cow_functions,
     enable_cow,
