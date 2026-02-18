@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "agent-cow"
 version = "0.1.0"
-description = "PostgreSQL Copy-On-Write for AI agent workspace isolation"
+description = "Database Copy-On-Write for AI agent workspace isolation"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -24,17 +24,19 @@ classifiers = [
     "Topic :: Database",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-dependencies = [
-    "sqlalchemy>=2.0.0",
-    "asyncpg>=0.29.0",
-    "psycopg2-binary>=2.9.0",
-]
+dependencies = []
 
 [project.optional-dependencies]
+sqlalchemy = [
+    "sqlalchemy>=2.0.0",
+    "asyncpg>=0.29.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "pytest-postgresql>=6.0.0",
+    "sqlalchemy>=2.0.0",
+    "asyncpg>=0.29.0",
 ]
 
 [project.urls]
@@ -43,4 +45,14 @@ Repository = "https://github.com/trail-ml/agent-cow"
 Issues = "https://github.com/trail-ml/agent-cow/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agent_cow"]
+packages = ["agent_cow"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-postgresql>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
