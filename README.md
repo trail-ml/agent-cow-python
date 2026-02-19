@@ -115,6 +115,8 @@ See the [PostgreSQL docs](./agentcow/postgres/) for the full guide: driver adapt
 - `CowRequestConfig` — Dataclass for COW configuration
 - `build_cow_variable_statements(session_id, operation_id)` — Build SET LOCAL SQL statements
 
+For parsing COW configuration from HTTP request headers (e.g. in FastAPI/Django/Flask middleware), see [`agentcow/examples/header_parsing_example.py`](./agentcow/examples/header_parsing_example.py).
+
 ## Development
 
 ```bash
