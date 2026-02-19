@@ -7,17 +7,17 @@ No driver-specific imports — only standard Python.
 """
 
 import uuid
-from typing import Optional
 from dataclasses import dataclass
+from .operations import _validate_uuid
 
 
 @dataclass
 class CowRequestConfig:
     """Configuration for a COW session."""
 
-    agent_session_id: Optional[uuid.UUID] = None
-    operation_id: Optional[uuid.UUID] = None
-    visible_operations: Optional[list[uuid.UUID]] = None
+    agent_session_id: uuid.UUID | None = None
+    operation_id: uuid.UUID | None = None
+    visible_operations: list[uuid.UUID] | None = None
 
     @property
     def is_cow_requested(self) -> bool:
@@ -40,13 +40,15 @@ def build_cow_variable_statements(
 
     Returns a list of ``SET LOCAL …`` strings ready for any driver.
     """
-    statements = [f"SET LOCAL app.session_id = '{agent_session_id}'"]
+    statements = [f"SET LOCAL app.session_id = '{_validate_uuid(agent_session_id)}'"]
 
     if operation_id:
-        statements.append(f"SET LOCAL app.operation_id = '{operation_id}'")
+        statements.append(
+            f"SET LOCAL app.operation_id = '{_validate_uuid(operation_id)}'"
+        )
 
     if visible_operations:
-        ops_str = ",".join(str(op) for op in visible_operations)
+        ops_str = ",".join(str(_validate_uuid(op)) for op in visible_operations)
         statements.append(f"SET LOCAL app.visible_operations = '{ops_str}'")
 
     return statements

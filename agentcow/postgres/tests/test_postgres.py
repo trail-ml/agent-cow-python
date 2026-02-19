@@ -127,7 +127,7 @@ async def test_cow_view_returns_base_data(seeded_executor):
     await enable_cow(seeded_executor, "users")
 
     rows = await seeded_executor.execute("SELECT name FROM users ORDER BY id")
-    assert rows == [("Alice",), ("Bob",)]
+    assert rows == [("Bessie",), ("Clyde",)]
 
 
 @pytest.mark.asyncio
@@ -139,24 +139,24 @@ async def test_cow_insert_is_session_scoped(seeded_executor, session_id, operati
 
     await apply_cow_variables(seeded_executor, session_id, operation_id)
     await seeded_executor.execute(
-        "INSERT INTO users (name, email) VALUES ('Charlie', 'charlie@example.com')"
+        "INSERT INTO users (name, email) VALUES ('Daisy', 'daisy@willowbrook.farm')"
     )
 
     view_rows = await seeded_executor.execute("SELECT name FROM users ORDER BY id")
-    assert ("Charlie",) in view_rows
+    assert ("Daisy",) in view_rows
 
     base_rows = await seeded_executor.execute("SELECT name FROM users_base ORDER BY id")
-    assert ("Charlie",) not in base_rows
+    assert ("Daisy",) not in base_rows
 
     changes_rows = await seeded_executor.execute(
         "SELECT name FROM users_changes WHERE session_id = " f"'{session_id}'::uuid"
     )
-    assert ("Charlie",) in changes_rows
+    assert ("Daisy",) in changes_rows
 
     await reset_cow_variables(seeded_executor)
 
     view_rows = await seeded_executor.execute("SELECT name FROM users ORDER BY id")
-    assert ("Charlie",) not in view_rows
+    assert ("Daisy",) not in view_rows
 
 
 @pytest.mark.asyncio
@@ -167,15 +167,15 @@ async def test_cow_delete_is_session_scoped(seeded_executor, session_id, operati
     await enable_cow(seeded_executor, "users")
 
     await apply_cow_variables(seeded_executor, session_id, operation_id)
-    await seeded_executor.execute("DELETE FROM users WHERE name = 'Alice'")
+    await seeded_executor.execute("DELETE FROM users WHERE name = 'Bessie'")
 
     rows = await seeded_executor.execute("SELECT name FROM users ORDER BY id")
-    assert ("Alice",) not in rows
+    assert ("Bessie",) not in rows
 
     await reset_cow_variables(seeded_executor)
 
     rows = await seeded_executor.execute("SELECT name FROM users ORDER BY id")
-    assert ("Alice",) in rows
+    assert ("Bessie",) in rows
 
 
 @pytest.mark.asyncio
@@ -187,7 +187,7 @@ async def test_commit_cow_session(seeded_executor, session_id, operation_id):
 
     await apply_cow_variables(seeded_executor, session_id, operation_id)
     await seeded_executor.execute(
-        "INSERT INTO users (name, email) VALUES ('Dana', 'dana@example.com')"
+        "INSERT INTO users (name, email) VALUES ('Dolly', 'dolly@cloverfield.farm')"
     )
 
     await reset_cow_variables(seeded_executor)
@@ -195,7 +195,7 @@ async def test_commit_cow_session(seeded_executor, session_id, operation_id):
     await commit_cow_session(seeded_executor, "users", session_id)
 
     rows = await seeded_executor.execute("SELECT name FROM users ORDER BY id")
-    assert ("Dana",) in rows
+    assert ("Dolly",) in rows
 
 
 @pytest.mark.asyncio
@@ -207,7 +207,7 @@ async def test_discard_cow_session(seeded_executor, session_id, operation_id):
 
     await apply_cow_variables(seeded_executor, session_id, operation_id)
     await seeded_executor.execute(
-        "INSERT INTO users (name, email) VALUES ('Eve', 'eve@example.com')"
+        "INSERT INTO users (name, email) VALUES ('Rosie', 'rosie@redbarns.farm')"
     )
 
     await reset_cow_variables(seeded_executor)
@@ -215,7 +215,7 @@ async def test_discard_cow_session(seeded_executor, session_id, operation_id):
     await discard_cow_session(seeded_executor, "users", session_id)
 
     rows = await seeded_executor.execute("SELECT name FROM users ORDER BY id")
-    assert ("Eve",) not in rows
+    assert ("Rosie",) not in rows
 
 
 @pytest.mark.asyncio
@@ -230,7 +230,7 @@ async def test_disable_cow_restores_table(seeded_executor):
     assert "users" not in status["tables_with_cow"]
 
     rows = await seeded_executor.execute("SELECT name FROM users ORDER BY id")
-    assert rows == [("Alice",), ("Bob",)]
+    assert rows == [("Bessie",), ("Clyde",)]
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +286,7 @@ async def test_disable_cow_schema(seeded_executor):
     assert status["tables_with_cow"] == []
 
     rows = await seeded_executor.execute("SELECT name FROM users ORDER BY id")
-    assert rows == [("Alice",), ("Bob",)]
+    assert rows == [("Bessie",), ("Clyde",)]
 
 
 @pytest.mark.asyncio

@@ -94,17 +94,17 @@ CREATE TABLE tasks (
 );
 
 INSERT INTO users (name, email) VALUES
-    ('Alice', 'alice@example.com'),
-    ('Bob',   'bob@example.com');
+    ('Bessie', 'bessie@sunnymeadow.farm'),
+    ('Clyde',  'clyde@lonepine.farm');
 
 INSERT INTO projects (owner_id, title, description) VALUES
-    (1, 'Alpha', 'First project'),
-    (2, 'Beta',  'Second project');
+    (1, 'North Pasture', 'Grazing rotation and fence maintenance'),
+    (2, 'Dairy Barn',    'Milk production and storage');
 
 INSERT INTO tasks (project_id, assigned_to, title) VALUES
-    (1, 1, 'Design schema'),
-    (1, 2, 'Write tests'),
-    (2, 1, 'Set up CI');
+    (1, 1, 'Repair fencing'),
+    (1, 2, 'Rotate hay bales'),
+    (2, 1, 'Install milking equipment');
 """
 
 

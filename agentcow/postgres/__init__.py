@@ -1,6 +1,7 @@
 """PostgreSQL Copy-On-Write (COW) implementation."""
 
 from .core import (
+    CowStatus,
     Executor,
     deploy_cow_functions,
     enable_cow,
@@ -26,6 +27,7 @@ from .session import (
 )
 
 __all__ = [
+    "CowStatus",
     "Executor",
     "deploy_cow_functions",
     "enable_cow",

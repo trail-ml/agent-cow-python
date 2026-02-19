@@ -6,7 +6,7 @@ All functions accept a generic ``Executor`` — no ORM or driver dependency.
 """
 
 import uuid
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, TypedDict, runtime_checkable
 
 from .cow_sql_functions import (
     COW_CHANGES_TABLE_NAME_SQL,
@@ -18,6 +18,7 @@ from .cow_sql_functions import (
     GET_SESSION_OPERATIONS_SQL,
 )
 from .operations import (
+    COW_FUNCTION_NAMES,
     setup_cow_sql,
     teardown_cow_sql,
     rename_table_sql,
@@ -67,6 +68,13 @@ class Executor(Protocol):
     """
 
     async def execute(self, sql: str) -> list[tuple[Any, ...]]: ...
+
+
+class CowStatus(TypedDict):
+    enabled: bool
+    tables_with_cow: list[str]
+    changes_tables: list[str]
+    cow_functions_deployed: bool
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +380,8 @@ async def is_cow_enabled(
         return False
 
     func_rows = await executor.execute(check_cow_functions_deployed_sql())
-    if (func_rows[0][0] if func_rows else 0) != 4:
+    expected = len(COW_FUNCTION_NAMES)
+    if (func_rows[0][0] if func_rows else 0) != expected:
         return False
 
     base_rows = await executor.execute(list_base_tables_sql(schema))
@@ -382,10 +391,11 @@ async def is_cow_enabled(
 async def get_cow_status(
     executor: Executor,
     schema: str = "public",
-) -> dict:
+) -> CowStatus:
     """Get the COW status for a schema."""
     func_rows = await executor.execute(check_cow_functions_deployed_sql())
-    cow_functions_deployed = (func_rows[0][0] if func_rows else 0) == 4
+    expected = len(COW_FUNCTION_NAMES)
+    cow_functions_deployed = (func_rows[0][0] if func_rows else 0) == expected
 
     base_rows = await executor.execute(list_base_tables_sql(schema))
     base_tables = [row[0] for row in base_rows]
@@ -395,9 +405,9 @@ async def get_cow_status(
 
     tables_with_cow = [t.replace("_base", "") for t in base_tables]
 
-    return {
-        "enabled": len(base_tables) > 0,
-        "tables_with_cow": tables_with_cow,
-        "changes_tables": changes_tables,
-        "cow_functions_deployed": cow_functions_deployed,
-    }
+    return CowStatus(
+        enabled=len(base_tables) > 0,
+        tables_with_cow=tables_with_cow,
+        changes_tables=changes_tables,
+        cow_functions_deployed=cow_functions_deployed,
+    )

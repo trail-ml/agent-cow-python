@@ -11,6 +11,9 @@ No driver-specific imports are used — only standard Python + raw SQL.
 import uuid
 
 
+COW_FUNCTION_NAMES = ("setup_cow", "commit_cow", "discard_cow", "teardown_cow")
+
+
 # ---------------------------------------------------------------------------
 # SQL formatting helpers
 # ---------------------------------------------------------------------------
@@ -26,9 +29,19 @@ def _quote_literal(s: str) -> str:
     return "'" + s.replace("'", "''") + "'"
 
 
+def _validate_uuid(value: str | uuid.UUID) -> uuid.UUID:
+    """Ensure *value* is a valid UUID, raising ``ValueError`` if not.
+
+    The ``uuid.UUID`` constructor raises ``ValueError`` for invalid strings.
+    """
+    if isinstance(value, uuid.UUID):
+        return value
+    return uuid.UUID(value)
+
+
 def _to_uuid(value: str | uuid.UUID) -> str:
     """Format a value as a PostgreSQL UUID literal."""
-    return f"{_quote_literal(str(value))}::uuid"
+    return f"{_quote_literal(str(_validate_uuid(value)))}::uuid"
 
 
 def _to_text_array(items: list[str]) -> str:
@@ -43,7 +56,7 @@ def _to_uuid_array(uuids: list[str | uuid.UUID]) -> str:
     """Format a list of UUIDs as a PostgreSQL uuid[] literal."""
     if not uuids:
         return "ARRAY[]::uuid[]"
-    vals = ",".join(_quote_literal(str(u)) for u in uuids)
+    vals = ",".join(_quote_literal(str(_validate_uuid(u))) for u in uuids)
     return f"ARRAY[{vals}]::uuid[]"
 
 
@@ -166,10 +179,8 @@ def get_table_pk_cols_sql(schema: str, table_name: str) -> str:
 
 def check_cow_functions_deployed_sql() -> str:
     """SQL to check whether the core COW PL/pgSQL functions are deployed."""
-    return (
-        "SELECT COUNT(*) FROM pg_proc "
-        "WHERE proname IN ('setup_cow', 'commit_cow', 'discard_cow', 'teardown_cow')"
-    )
+    names = ", ".join(_quote_literal(n) for n in COW_FUNCTION_NAMES)
+    return f"SELECT COUNT(*) FROM pg_proc WHERE proname IN ({names})"
 
 
 def list_user_tables_sql(schema: str) -> str:
@@ -323,6 +334,6 @@ def set_visible_operations_sql(
 ) -> str:
     """SQL to set which operations' changes are visible in subsequent queries."""
     if operation_ids:
-        ops_str = ",".join(str(op) for op in operation_ids)
+        ops_str = ",".join(str(_validate_uuid(op)) for op in operation_ids)
         return f"SET LOCAL app.visible_operations = '{ops_str}'"
     return "SET LOCAL app.visible_operations = ''"
