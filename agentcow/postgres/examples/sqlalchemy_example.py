@@ -14,14 +14,12 @@ Sections:
     1. Executor adapter           -- wraps AsyncSession for agent-cow
     2. Session listener            -- re-applies SET LOCAL after every commit
     3. COW session context manager -- recommended entry point
-    4. Request header parsing      -- extracts COW config from HTTP headers
-    5. Model-aware enable/disable  -- topological FK ordering
-    6. Schema-level commit/discard -- auto-detects dirty tables
-    7. Migration helpers           -- disable COW before, re-enable after
-    8. Runnable demo               -- python -m agentcow.postgres.examples.sqlalchemy_example
+    4. Model-aware enable/disable  -- topological FK ordering
+    5. Schema-level commit/discard -- auto-detects dirty tables
+    6. Runnable demo               -- python -m agentcow.postgres.examples.sqlalchemy_example
 
 Requirements:
-    pip install agent-cow sqlalchemy asyncpg
+    uv add agent-cow sqlalchemy asyncpg
     A running PostgreSQL instance with: CREATE DATABASE agent_cow_example;
 """
 
@@ -29,10 +27,9 @@ from __future__ import annotations
 
 import asyncio
 import collections
-import logging
+import traceback
 import uuid
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 from sqlalchemy import Column, ForeignKey, Integer, String, event, inspect, select, text
@@ -48,14 +45,12 @@ from agentcow.postgres import (
     apply_cow_variables,
     build_cow_variable_statements,
     commit_cow_session,
+    commit_cow_operations,
     deploy_cow_functions,
     disable_cow,
-    discard_cow_session,
     enable_cow,
     get_cow_status,
 )
-
-logger = logging.getLogger(__name__)
 
 DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost/agent_cow_example"
 
@@ -94,7 +89,16 @@ ALL_MODELS: list[type[Base]] = [User, Project]
 
 
 class SAExecutor:
-    """Wraps a SQLAlchemy AsyncSession to satisfy the agent-cow Executor protocol."""
+    """Wraps a SQLAlchemy AsyncSession to satisfy the agent-cow Executor protocol.
+
+    The ``Executor`` protocol (defined in ``agentcow.postgres.core``) requires a
+    single async method::
+
+        async def execute(self, sql: str) -> list[tuple[Any, ...]]
+
+    It receives a raw SQL string and must return rows as a list of tuples.
+    Non-row-returning statements (INSERT, UPDATE, DDL) should return ``[]``.
+    """
 
     def __init__(self, session: AsyncSession):
         self._session = session
@@ -165,7 +169,7 @@ async def cow_session(
     The session listener ensures variables survive across commits. This is
     the recommended way to use agent-cow with SQLAlchemy::
 
-        async with cow_session(maker, sid, op_id) as session:
+        async with cow_session(maker, session_id, op_id) as session:
             session.add(User(name="Bessie"))
             await session.commit()
             # COW variables are still active here
@@ -174,76 +178,20 @@ async def cow_session(
     async with session_maker() as session:
         ex = SAExecutor(session)
         await apply_cow_variables(ex, session_id, operation_id, visible_operations)
-        setup_cow_session_listener(session, session_id, operation_id, visible_operations)
+        setup_cow_session_listener(
+            session, session_id, operation_id, visible_operations
+        )
         yield session
 
 
 # =============================================================================
-# 4. Request header parsing
+# 4. Model-aware enable/disable with FK ordering
 # =============================================================================
 
 
-@dataclass
-class CowRequestConfig:
-    """COW configuration parsed from HTTP request headers."""
-
-    session_id: uuid.UUID | None = None
-    operation_id: uuid.UUID | None = None
-    visible_operations: list[uuid.UUID] | None = None
-
-    @property
-    def is_cow_requested(self) -> bool:
-        return self.session_id is not None
-
-
-def parse_cow_headers(request) -> CowRequestConfig:
-    """Parse COW configuration from HTTP request headers.
-
-    Expected headers::
-
-        x-agent-session-id: UUID
-        x-operation-id: UUID
-        x-visible-operations: comma-separated UUIDs
-
-    Invalid values are logged and treated as absent.
-    Works with FastAPI, Starlette, or any object with a ``.headers`` dict.
-    """
-    if request is None:
-        return CowRequestConfig()
-
-    def _uuid(header: str) -> uuid.UUID | None:
-        value = request.headers.get(header)
-        if not value:
-            return None
-        try:
-            return uuid.UUID(value)
-        except ValueError:
-            logger.warning("Invalid %s header: %r", header, value)
-            return None
-
-    def _uuid_list(header: str) -> list[uuid.UUID] | None:
-        value = request.headers.get(header)
-        if not value:
-            return None
-        try:
-            return [uuid.UUID(v.strip()) for v in value.split(",") if v.strip()]
-        except ValueError:
-            logger.warning("Invalid %s header: %r", header, value)
-            return None
-
-    return CowRequestConfig(
-        session_id=_uuid("x-agent-session-id"),
-        operation_id=_uuid("x-operation-id"),
-        visible_operations=_uuid_list("x-visible-operations"),
-    )
-
-
-# =============================================================================
-# 5. Model-aware enable/disable with FK ordering
-# =============================================================================
-
-
-def _toposort_models(models: list[type[DeclarativeBase]]) -> list[type[DeclarativeBase]]:
+def _toposort_models(
+    models: list[type[DeclarativeBase]],
+) -> list[type[DeclarativeBase]]:
     """Topologically sort models so FK parents come before children."""
     model_map: dict[str, type[DeclarativeBase]] = {}
     for m in models:
@@ -317,21 +265,18 @@ async def disable_cow_for_models(
 
 
 # =============================================================================
-# 6. Schema-level commit/discard with dirty-table detection
+# 5. Schema-level commit/discard with dirty-table detection
 # =============================================================================
 
 
-async def commit_cow_session_all(
+async def _find_dirty_models(
     session: AsyncSession,
     session_id: uuid.UUID,
     models: list[type[DeclarativeBase]],
-    schema: str = "public",
-) -> list[str]:
-    """Commit a COW session across all models that have changes.
-
-    Discovers which tables have pending changes, topologically sorts them,
-    and commits in FK-safe order. Returns table names that were committed.
-    """
+    schema: str,
+    operation_ids: list[uuid.UUID] | None = None,
+) -> tuple[SAExecutor, list[type[DeclarativeBase]]]:
+    """Return an executor and the subset of *models* that have pending changes."""
     ex = SAExecutor(session)
 
     result = await session.execute(
@@ -343,21 +288,73 @@ async def commit_cow_session_all(
     )
     existing_changes = {row[0] for row in result}
 
-    dirty_models = []
+    dirty: list[type[DeclarativeBase]] = []
     for model in models:
         changes_table = f"{model.__tablename__}_changes"
         if changes_table not in existing_changes:
             continue
+        where = "WHERE session_id = :sid"
+        if operation_ids:
+            op_literals = ", ".join(f"'{op}'::uuid" for op in operation_ids)
+            where += f" AND operation_id = ANY(ARRAY[{op_literals}])"
         has_rows = await session.execute(
-            text(
-                f'SELECT 1 FROM "{schema}"."{changes_table}" '
-                f"WHERE session_id = :sid LIMIT 1"
-            ),
+            text(f'SELECT 1 FROM "{schema}"."{changes_table}" ' f"{where} LIMIT 1"),
             {"sid": session_id},
         )
         if has_rows.scalar():
-            dirty_models.append(model)
+            dirty.append(model)
 
+    return ex, dirty
+
+
+async def commit_cow_operations_all(
+    session: AsyncSession,
+    session_id: uuid.UUID,
+    operation_ids: list[uuid.UUID],
+    models: list[type[DeclarativeBase]],
+    schema: str = "public",
+) -> list[str]:
+    """Commit specific operations across all models that have changes.
+
+    Discovers which tables have pending changes for the given *operation_ids*,
+    topologically sorts them, and commits in FK-safe order.
+    Returns table names that were committed.
+
+    To commit an entire session at once, use ``commit_cow_session_all``.
+    """
+    ex, dirty_models = await _find_dirty_models(
+        session, session_id, models, schema, operation_ids
+    )
+    if not dirty_models:
+        return []
+
+    committed = []
+    for model in _toposort_models(dirty_models):
+        table_name = model.__tablename__
+        pk_cols = [col.name for col in inspect(model).primary_key]
+        await commit_cow_operations(
+            ex,
+            table_name,
+            session_id,
+            operation_ids,
+            pk_cols=pk_cols,
+            schema=schema,
+        )
+        committed.append(table_name)
+    return committed
+
+
+async def commit_cow_session_all(
+    session: AsyncSession,
+    session_id: uuid.UUID,
+    models: list[type[DeclarativeBase]],
+    schema: str = "public",
+) -> list[str]:
+    """Commit all operations in a session across all models that have changes.
+
+    To commit only specific operations, use ``commit_cow_operations_all``.
+    """
+    ex, dirty_models = await _find_dirty_models(session, session_id, models, schema)
     if not dirty_models:
         return []
 
@@ -387,98 +384,13 @@ async def discard_cow_session_all(
     )
     for (changes_table,) in result:
         await session.execute(
-            text(
-                f'DELETE FROM "{schema}"."{changes_table}" WHERE session_id = :sid'
-            ),
+            text(f'DELETE FROM "{schema}"."{changes_table}" WHERE session_id = :sid'),
             {"sid": session_id},
         )
 
 
 # =============================================================================
-# 7. Migration helpers
-# =============================================================================
-# COW replaces tables with views. ALTER TABLE on a view fails, so you must
-# disable COW before migrations and re-enable after.
-# =============================================================================
-
-
-async def disable_cow_before_migration(
-    session: AsyncSession,
-    models: list[type[DeclarativeBase]],
-    schema: str = "public",
-) -> bool:
-    """Disable COW if enabled. Returns True if COW was active."""
-    ex = SAExecutor(session)
-    status = await get_cow_status(ex, schema=schema)
-    if not status["enabled"]:
-        return False
-    await disable_cow_for_models(session, models, schema=schema)
-    await session.commit()
-    return True
-
-
-async def reenable_cow_after_migration(
-    session: AsyncSession,
-    models: list[type[DeclarativeBase]],
-    schema: str = "public",
-) -> None:
-    """Re-enable COW after a migration. Call only if disable returned True."""
-    ex = SAExecutor(session)
-    await deploy_cow_functions(ex)
-    await enable_cow_for_models(session, models, schema=schema)
-    await session.commit()
-
-
-# =============================================================================
-# Usage patterns (commented)
-# =============================================================================
-#
-# --- FastAPI dependency ---
-#
-#     from fastapi import FastAPI, Request, Depends
-#
-#     app = FastAPI()
-#     engine = create_async_engine("postgresql+asyncpg://...")
-#     session_maker = async_sessionmaker(engine, expire_on_commit=False)
-#
-#     async def get_db(request: Request):
-#         config = parse_cow_headers(request)
-#         if config.is_cow_requested:
-#             async with cow_session(
-#                 session_maker,
-#                 config.session_id,
-#                 config.operation_id,
-#                 config.visible_operations,
-#             ) as session:
-#                 yield session
-#         else:
-#             async with session_maker() as session:
-#                 yield session
-#
-#     @app.post("/api/users")
-#     async def create_user(session: AsyncSession = Depends(get_db)):
-#         session.add(User(name="Bessie"))
-#         await session.commit()
-#         return {"status": "ok"}
-#
-# --- Alembic env.py ---
-#
-#     async def run_async_migrations():
-#         async with connectable.connect() as connection:
-#             async with AsyncSession(bind=connection) as session:
-#                 was_enabled = await disable_cow_before_migration(
-#                     session, all_models, schema="my_schema"
-#                 )
-#             await connection.run_sync(do_run_migrations)
-#             if was_enabled:
-#                 async with AsyncSession(bind=connection) as session:
-#                     await reenable_cow_after_migration(
-#                         session, all_models, schema="my_schema"
-#                     )
-
-
-# =============================================================================
-# 8. Runnable demo
+# 6. Runnable demo
 # =============================================================================
 
 
@@ -554,9 +466,7 @@ async def demo_cross_table():
     op_id = uuid.uuid4()
 
     async with cow_session(session_maker, sid, op_id) as session:
-        result = await session.execute(
-            select(User).where(User.name == "Bessie")
-        )
+        result = await session.execute(select(User).where(User.name == "Bessie"))
         bessie = result.scalar_one()
         session.add(Project(owner_id=bessie.id, title="Pasture Expansion"))
         await session.commit()
@@ -595,7 +505,7 @@ async def main():
         await demo_cross_table()
     except Exception as e:
         print(f"\nError: {e}")
-        import traceback
+
         traceback.print_exc()
     finally:
         await cleanup()

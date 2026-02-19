@@ -142,7 +142,7 @@ See the [interactive demo](https://www.agent-cow.com) for a worked example of a 
 
 ## Web Framework Integration
 
-Here's how to wire `agent-cow` into a FastAPI app so that any request carrying COW headers writes to an isolated session:
+Here's how to wire `agent-cow` into a FastAPI app so that any request carrying COW headers writes to an isolated session. See [`agentcow/examples/header_parsing_example.py`](../examples/header_parsing_example.py) for a reusable header-parsing utility and middleware pattern.
 
 ```python
 import uuid

@@ -325,9 +325,6 @@ async def get_operation_dependencies(
     return [(row[0], row[1]) for row in rows]
 
 
-get_cow_dependencies = get_operation_dependencies
-
-
 async def set_visible_operations(
     executor: Executor,
     operation_ids: list[str | uuid.UUID] | None,

@@ -6,7 +6,7 @@ PG_USER="${PG_USER:-postgres}"
 PG_PASSWORD="${PG_PASSWORD:-postgres}"
 PG_DBNAME="${PG_DBNAME:-agent_cow_test}"
 PG_PORT="${PG_PORT:-5432}"
-PG_VERSION="${PG_VERSION:-16}"
+PG_VERSION="${PG_VERSION:-18}"
 
 if docker inspect "$CONTAINER_NAME" &>/dev/null; then
     if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME")" = "true" ]; then

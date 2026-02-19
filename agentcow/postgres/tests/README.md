@@ -8,7 +8,7 @@ Start a local Postgres container:
 ./agentcow/postgres/tests/start-test-db.sh
 ```
 
-This creates a Docker container (`agent-cow-pg`) with Postgres 16 on port 5432.
+This creates a Docker container (`agent-cow-pg`) with Postgres 18 on port 5432.
 The script is idempotent — it reuses an existing container if one already exists.
 
 ## Running tests
