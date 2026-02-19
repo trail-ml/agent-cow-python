@@ -56,10 +56,8 @@ Alignment is an open problem in AI safety, and [misalignment during agent execut
 | Backend | Docs | Status |
 |---------|------|--------|
 | **PostgreSQL** | [agentcow/postgres](./agentcow/postgres/) | Available |
-| **pg-lite (TypeScript)** | [agent-cow-typescript](https://github.com/trail-ml/agent-cow-typescript) | Available |
+| **pg-lite (TypeScript)** | [agent-cow-typescript](https://github.com/trail-ml/agent-cow-ts) | Available |
 | **Blob/File Storage** | — | In progress |
-
-Looking for the **TypeScript/PGlite** implementation? See [@agent-cow/pg-lite](https://github.com/trail-ml/agent-cow-pglite).
 
 ## Quick Example (PostgreSQL)
 
