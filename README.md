@@ -5,8 +5,22 @@
 [![PyPI](https://img.shields.io/pypi/v/agent-cow.svg)](https://pypi.org/project/agent-cow/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+`agent-cow` intercepts your AI agent's database writes and isolates them in a copy-on-write layer. The agent thinks it's modifying real data, but nothing touches production until you approve. Zero changes to your existing queries.
+
 > Read the full article: [Copy-on-Write in Agentic Systems](https://www.trail-ml.com/blog/agent-cow)
 > Try the interactive demo: [www.agent-cow.com](https://www.agent-cow.com)
+
+```
+Without agent-cow:                With agent-cow:
+
+┌───────┐       ┌──────────┐     ┌───────┐     ┌──────┐     ┌──────────┐
+│ Agent │──────>│ Database │     │ Agent │────>│ COW  │────>│ Database │
+└───────┘       └──────────┘     └───────┘     │ View │     └──────────┘
+ writes directly                               └──────┘
+ to production                                   writes go to changes table
+                                                 reads merge base + changes
+                                                 user reviews, then commits or discards
+```
 
 ## Installation
 
@@ -14,21 +28,7 @@
 pip install agent-cow
 ```
 
-Requires Python 3.10+ and a PostgreSQL database.
-
-## Copy-on-Write for Agentic Systems
-
-Alignment is an open problem in AI safety, and [misalignment during agent execution may not always be obvious](https://www.cold-takes.com/why-ai-alignment-could-be-hard-with-modern-deep-learning/). At best, a misaligned agent is annoying (ie. if the agent does something other than what the user wants it to do) and at worst, dangerous (i.e. leading to sensitive data loss, tool misuse, and [other harms](https://www.anthropic.com/research/agentic-misalignment)). Rather than tackling the alignment problem directly, this repo focuses on minimizing potential harm a misaligned agent can cause. 
-
-`agent-cow` provides database-level Copy-On-Write (CoW) functionality - enabling **workspace isolation** for AI agents, and protecting production data from unintended or misaligned agent actions. When an agent makes database changes during a session, those changes are isolated and can be reviewed, then committed or discarded -- without affecting production data until the user approves.
-
-Changes are stored in a separate table, rather than allowing agents to modify production data directly. During a session, the agent's changes appear 'merged' with the original data (it 'believes' they have been applied). At the end of a session, these changes can be visualized in a dependency graph and selectively committed by the user. 
-
-**This approach has various benefits**: 
-- **Changes can be reviewed at the end of a session**, rather than needing to repeatedly 'accept' each action as it is executed. This minimizes the direct human supervision required while improving the safeguards in place. 
-- Mistakes are less consequential, since the **agent can't write directly to the main/production data**. If some changes are good but others aren't, users can cherry-pick operations they wish to keep.
-- **Misalignment patterns become more visible**. When reviewing changes at the end of a session, users can clearly identify where the agent deviated from intended behavior and adjust the system prompt or agent configuration accordingly to prevent similar issues in future sessions.
-- **Multiple agents or agent sessions** can run simultaneously on isolated copies without interfering with each other.
+Requires Python 3.10+.
 
 ## How It Works
 
@@ -41,20 +41,31 @@ When you set `app.session_id` and `app.operation_id` variables, all writes go to
 
 See the [interactive demo](https://www.agent-cow.com) for a worked example of an inventory management system where an agent makes both good and bad decisions.
 
-## Quick Start
+<details>
+<summary><strong>Why Copy-on-Write for agents?</strong></summary>
+
+Alignment is an open problem in AI safety, and [misalignment during agent execution may not always be obvious](https://www.cold-takes.com/why-ai-alignment-could-be-hard-with-modern-deep-learning/). At best, a misaligned agent is annoying (ie. if the agent does something other than what the user wants it to do) and at worst, dangerous (i.e. leading to sensitive data loss, tool misuse, and [other harms](https://www.anthropic.com/research/agentic-misalignment)). Rather than tackling the alignment problem directly, this repo focuses on minimizing potential harm a misaligned agent can cause.
+
+- **Changes can be reviewed at the end of a session**, rather than needing to repeatedly 'accept' each action as it is executed. This minimizes the direct human supervision required while improving the safeguards in place.
+- Mistakes are less consequential, since the **agent can't write directly to the main/production data**. If some changes are good but others aren't, users can cherry-pick operations they wish to keep.
+- **Misalignment patterns become more visible**. When reviewing changes at the end of a session, users can clearly identify where the agent deviated from intended behavior and adjust the system prompt or agent configuration accordingly to prevent similar issues in future sessions.
+- **Multiple agents or agent sessions** can run simultaneously on isolated copies without interfering with each other.
+</details>
+
+## Backends
+| Backend | Docs | Status |
+|---------|------|--------|
+| **PostgreSQL** | [agentcow/postgres](./agentcow/postgres/) | Available |
+| **pg-lite (TypeScript)** | [agent-cow-typescript](https://github.com/trail-ml/agent-cow-ts) | Available |
+| **Blob/File Storage** | — | In progress |
+
+## Quick Example (PostgreSQL)
 
 ```python
 import uuid
-from agent_cow.postgres import (
-    Executor,
-    deploy_cow_functions,
-    enable_cow,
-    commit_cow_session,
-    apply_cow_variables,
-    get_cow_status,
-)
+from agentcow.postgres import deploy_cow_functions, enable_cow_schema, apply_cow_variables, commit_cow_session
 
-# Any object with an async execute(sql) -> list[tuple] method works
+# Wrap any async PostgreSQL driver — asyncpg, SQLAlchemy, psycopg, etc.
 class MyExecutor:
     def __init__(self, conn):
         self._conn = conn
@@ -63,32 +74,20 @@ class MyExecutor:
 
 executor = MyExecutor(conn)
 
-# One-time setup
+# One-time setup — enables COW on all tables in the schema
 await deploy_cow_functions(executor)
-await enable_cow(executor, "users")
+await enable_cow_schema(executor)
 
-# Agent session
+# Agent session — all writes are isolated
 session_id = uuid.uuid4()
-operation_id = uuid.uuid4()
-await apply_cow_variables(executor, session_id, operation_id)
-
-# ... agent makes changes ...
+await apply_cow_variables(executor, session_id, operation_id=uuid.uuid4())
+await executor.execute("INSERT INTO users (name) VALUES ('Bessie')")
 
 # Review, then commit or discard
 await commit_cow_session(executor, "users", session_id)
 ```
 
-## Backends
-
-| Backend | Status |
-|---------|--------|
-| **PostgreSQL** | Available |
-| **Blob/File Storage** | In progress |
-| **MySQL** | Planned |
-| **SQLite** | Planned |
-| **MongoDB** | Planned |
-
-Looking for the **TypeScript/PGlite** implementation? See [@agent-cow/pg-lite](https://github.com/trail-ml/agent-cow-pglite).
+See the [PostgreSQL docs](./agentcow/postgres/) for the full guide: driver adapters, schema-wide setup, selective commit, web framework integration, and the complete API reference.
 
 ## API Reference
 
@@ -96,7 +95,9 @@ Looking for the **TypeScript/PGlite** implementation? See [@agent-cow/pg-lite](h
 
 - `deploy_cow_functions(executor)` — Deploy COW SQL functions (one-time setup)
 - `enable_cow(executor, table_name)` — Enable COW on a table
+- `enable_cow_schema(executor)` — Enable COW on all tables in a schema
 - `disable_cow(executor, table_name)` — Disable COW and restore original table
+- `disable_cow_schema(executor)` — Disable COW on all tables in a schema
 - `commit_cow_session(executor, table_name, session_id)` — Commit all session changes
 - `discard_cow_session(executor, table_name, session_id)` — Discard all session changes
 - `get_cow_status(executor)` — Get COW status for a schema
@@ -112,7 +113,6 @@ Looking for the **TypeScript/PGlite** implementation? See [@agent-cow/pg-lite](h
 ### Session Management
 
 - `CowRequestConfig` — Dataclass for COW configuration
-- `parse_cow_headers_from_request(request)` — Parse COW config from HTTP headers
 - `build_cow_variable_statements(session_id, operation_id)` — Build SET LOCAL SQL statements
 
 ## Development
@@ -121,7 +121,7 @@ Looking for the **TypeScript/PGlite** implementation? See [@agent-cow/pg-lite](h
 git clone https://github.com/trail-ml/agent-cow.git
 cd agent-cow
 pip install -e ".[dev]"
-pytest agent_cow/postgres/tests/ -v
+pytest agentcow/postgres/tests/ -v
 ```
 
 ## Contributing
