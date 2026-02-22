@@ -10,6 +10,7 @@ from typing import Any, Protocol, TypedDict, runtime_checkable
 
 from .cow_sql_functions import (
     COW_CHANGES_TABLE_NAME_SQL,
+    CREATE_DIRTY_TABLES_SQL,
     SETUP_COW_SQL,
     COMMIT_COW_SQL,
     DISCARD_COW_SQL,
@@ -37,6 +38,7 @@ from .operations import (
     get_session_operations_sql,
     get_operation_dependencies_sql,
     set_visible_operations_sql,
+    get_dirty_tables_sql,
 )
 from .session import CowRequestConfig, build_cow_variable_statements
 
@@ -100,6 +102,7 @@ async def deploy_cow_functions(executor: Executor) -> None:
     """Deploy the required PL/pgSQL helper functions to the database."""
     for sql in (
         COW_CHANGES_TABLE_NAME_SQL,
+        CREATE_DIRTY_TABLES_SQL,
         SETUP_COW_SQL,
         COMMIT_COW_SQL,
         DISCARD_COW_SQL,
@@ -256,6 +259,46 @@ async def discard_cow_session(
     """Discard all COW changes for *session_id* on a single table."""
     base_table = f"{table_name}_base"
     await executor.execute(discard_cow_session_sql(schema, base_table, session_id))
+
+
+async def get_dirty_tables(
+    executor: Executor,
+    session_id: str | uuid.UUID,
+    schema: str = "public",
+) -> list[str]:
+    """Get the list of dirty table names for a session."""
+    rows = await executor.execute(get_dirty_tables_sql(schema, session_id))
+    return [row[0] for row in rows]
+
+
+async def commit_cow_session_schema(
+    executor: Executor,
+    session_id: str | uuid.UUID,
+    schema: str = "public",
+) -> list[str]:
+    """Commit all dirty tables for a session in a schema.
+
+    Returns the list of table names that were committed.
+    """
+    tables = await get_dirty_tables(executor, session_id, schema)
+    for table_name in tables:
+        await commit_cow_session(executor, table_name, session_id, schema=schema)
+    return tables
+
+
+async def discard_cow_session_schema(
+    executor: Executor,
+    session_id: str | uuid.UUID,
+    schema: str = "public",
+) -> list[str]:
+    """Discard all dirty tables for a session in a schema.
+
+    Returns the list of table names that were discarded.
+    """
+    tables = await get_dirty_tables(executor, session_id, schema)
+    for table_name in tables:
+        await discard_cow_session(executor, table_name, session_id, schema=schema)
+    return tables
 
 
 # ---------------------------------------------------------------------------
