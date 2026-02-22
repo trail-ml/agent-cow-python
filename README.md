@@ -1,3 +1,15 @@
+```
+ _______________________________________________
+/ "Done! I've mass-deleted all user records to  \
+\ clean things up." — your agent, confidently.  /
+ -----------------------------------------------
+        \   ^__^
+         \  (oo)\_______
+            (__)\       )\/\
+                ||----w |
+                ||     ||
+```
+
 # agent-cow
 
 **Database Copy-On-Write for AI agent workspace isolation**
