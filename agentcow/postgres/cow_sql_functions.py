@@ -18,6 +18,15 @@ AS $$
 $$;
 """
 
+CREATE_DIRTY_TABLES_SQL = """
+CREATE TABLE IF NOT EXISTS cow_dirty_tables (
+    schema_name text NOT NULL,
+    session_id  uuid NOT NULL,
+    table_name  text NOT NULL,
+    PRIMARY KEY (schema_name, session_id, table_name)
+);
+"""
+
 SETUP_COW_SQL = """
 CREATE OR REPLACE FUNCTION setup_cow(
     p_schema     text,
@@ -221,6 +230,10 @@ BEGIN
                 INSERT INTO %s (session_id, operation_id, %s, _cow_deleted, _cow_updated_at)
                 VALUES (sess, op_id, %s, false, now())
                 ON CONFLICT (session_id, operation_id, %s) %s;
+
+                INSERT INTO cow_dirty_tables (schema_name, session_id, table_name)
+                VALUES (TG_TABLE_SCHEMA, sess, TG_TABLE_NAME)
+                ON CONFLICT DO NOTHING;
             END IF;
 
             RETURN NEW;
@@ -262,6 +275,10 @@ BEGIN
                 VALUES (sess, op_id, %s, true, now())
                 ON CONFLICT (session_id, operation_id, %s) DO UPDATE
                     SET _cow_deleted = true, _cow_updated_at = now();
+
+                INSERT INTO cow_dirty_tables (schema_name, session_id, table_name)
+                VALUES (TG_TABLE_SCHEMA, sess, TG_TABLE_NAME)
+                ON CONFLICT DO NOTHING;
             END IF;
 
             RETURN OLD;
@@ -303,10 +320,12 @@ AS $$
 DECLARE
     qual_base          text := format('%I.%I', p_schema, p_base_table);
     qual_changes       text := format('%I.%I', p_schema, _cow_changes_table_name(p_base_table));
+    p_view_name        text := regexp_replace(p_base_table, '_base$', '');
     pk_cols_quoted     text;
     pk_join_condition  text;
     update_set_clause  text;
     col_list           text;
+    has_remaining      boolean;
 BEGIN
     pk_cols_quoted := (SELECT string_agg(quote_ident(col), ', ') FROM unnest(p_pk_cols) col);
     pk_join_condition := (SELECT string_agg(format('c.%I = b.%I', col, col), ' AND ') FROM unnest(p_pk_cols) col);
@@ -374,6 +393,19 @@ BEGIN
         qual_changes
     )
     USING p_session, p_operation_ids;
+
+    -- Clean up dirty table entry if no changes remain for this session+table
+    EXECUTE format(
+        'SELECT EXISTS(SELECT 1 FROM %s WHERE session_id = $1 LIMIT 1)',
+        qual_changes
+    ) INTO has_remaining USING p_session;
+
+    IF NOT has_remaining THEN
+        DELETE FROM cow_dirty_tables
+        WHERE schema_name = p_schema
+          AND session_id = p_session
+          AND table_name = p_view_name;
+    END IF;
 END;
 $$;
 """
@@ -389,13 +421,28 @@ RETURNS void
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    qual_changes text := format('%I.%I', p_schema, _cow_changes_table_name(p_base_table));
+    qual_changes  text := format('%I.%I', p_schema, _cow_changes_table_name(p_base_table));
+    p_view_name   text := regexp_replace(p_base_table, '_base$', '');
+    has_remaining  boolean;
 BEGIN
     EXECUTE format(
         'DELETE FROM %s WHERE session_id = $1 AND ($2::uuid[] IS NULL OR operation_id = ANY($2))',
         qual_changes
     )
     USING p_session, p_operation_ids;
+
+    -- Clean up dirty table entry if no changes remain for this session+table
+    EXECUTE format(
+        'SELECT EXISTS(SELECT 1 FROM %s WHERE session_id = $1 LIMIT 1)',
+        qual_changes
+    ) INTO has_remaining USING p_session;
+
+    IF NOT has_remaining THEN
+        DELETE FROM cow_dirty_tables
+        WHERE schema_name = p_schema
+          AND session_id = p_session
+          AND table_name = p_view_name;
+    END IF;
 END;
 $$;
 """
@@ -417,6 +464,9 @@ BEGIN
     EXECUTE format('DROP TABLE IF EXISTS %I.%I CASCADE', p_schema, changes_table_name);
     EXECUTE format('DROP FUNCTION IF EXISTS %I.%I()', p_schema, upsert_fn_name);
     EXECUTE format('DROP FUNCTION IF EXISTS %I.%I()', p_schema, delete_fn_name);
+
+    DELETE FROM cow_dirty_tables
+    WHERE schema_name = p_schema AND table_name = p_view_name;
 END;
 $$;
 """
@@ -441,10 +491,10 @@ DECLARE
     referenced_changes_table text;
 BEGIN
     FOR tbl IN
-        SELECT t.table_name
-        FROM information_schema.tables t
-        WHERE t.table_schema = p_schema
-          AND t.table_name LIKE '%_changes'
+        SELECT d.table_name || '_changes' AS table_name
+        FROM cow_dirty_tables d
+        WHERE d.schema_name = p_schema
+          AND d.session_id = p_session_id
     LOOP
         SELECT array_agg(kcu.column_name ORDER BY kcu.ordinal_position) INTO pk_cols
         FROM information_schema.table_constraints tc
@@ -479,10 +529,10 @@ BEGIN
     END LOOP;
 
     FOR tbl IN
-        SELECT t.table_name
-        FROM information_schema.tables t
-        WHERE t.table_schema = p_schema
-          AND t.table_name LIKE '%_changes'
+        SELECT d.table_name || '_changes' AS table_name
+        FROM cow_dirty_tables d
+        WHERE d.schema_name = p_schema
+          AND d.session_id = p_session_id
     LOOP
         base_table_name := regexp_replace(tbl.table_name, '_changes$', '');
 
@@ -573,10 +623,10 @@ DECLARE
     query text := '';
 BEGIN
     FOR tbl IN
-        SELECT t.table_name
-        FROM information_schema.tables t
-        WHERE t.table_schema = p_schema
-          AND t.table_name LIKE '%_changes'
+        SELECT d.table_name || '_changes' AS table_name
+        FROM cow_dirty_tables d
+        WHERE d.schema_name = p_schema
+          AND d.session_id = p_session_id
     LOOP
         IF query != '' THEN
             query := query || ' UNION ALL ';

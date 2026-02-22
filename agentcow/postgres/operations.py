@@ -190,7 +190,8 @@ def list_user_tables_sql(schema: str) -> str:
         f"WHERE table_schema = {_quote_literal(schema)} "
         "AND table_type = 'BASE TABLE' "
         "AND table_name NOT LIKE '%\\_base' "
-        "AND table_name NOT LIKE '%\\_changes'"
+        "AND table_name NOT LIKE '%\\_changes' "
+        "AND table_name != 'cow_dirty_tables'"
     )
 
 
@@ -337,3 +338,15 @@ def set_visible_operations_sql(
         ops_str = ",".join(str(_validate_uuid(op)) for op in operation_ids)
         return f"SET LOCAL app.visible_operations = '{ops_str}'"
     return "SET LOCAL app.visible_operations = ''"
+
+
+def get_dirty_tables_sql(
+    schema: str,
+    session_id: str | uuid.UUID,
+) -> str:
+    """SQL to get all dirty table names for a session from cow_dirty_tables."""
+    return (
+        "SELECT table_name FROM cow_dirty_tables "
+        f"WHERE schema_name = {_quote_literal(schema)} "
+        f"AND session_id = {_to_uuid(session_id)}"
+    )
