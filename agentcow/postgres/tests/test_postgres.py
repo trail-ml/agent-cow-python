@@ -1,5 +1,7 @@
 """Tests for agent-cow PostgreSQL COW implementation."""
 
+import uuid
+
 import pytest
 
 from agentcow.postgres import (
@@ -17,6 +19,9 @@ from agentcow.postgres import (
     get_cow_status,
     commit_cow_session,
     discard_cow_session,
+    get_dirty_tables,
+    commit_cow_session_schema,
+    discard_cow_session_schema,
 )
 
 
@@ -299,3 +304,148 @@ async def test_disable_cow_schema_exclude(seeded_executor):
     assert "users" not in disabled
     status = await get_cow_status(seeded_executor)
     assert "users" in status["tables_with_cow"]
+
+
+# ---------------------------------------------------------------------------
+# Dirty tables tracking
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dirty_tables_populated_on_insert(
+    seeded_executor, session_id, operation_id
+):
+    """An INSERT within a COW session should record the table in cow_dirty_tables."""
+    await deploy_cow_functions(seeded_executor)
+    await enable_cow(seeded_executor, "users")
+
+    await apply_cow_variables(seeded_executor, session_id, operation_id)
+    await seeded_executor.execute(
+        "INSERT INTO users (name, email) VALUES ('Flora', 'flora@meadow.farm')"
+    )
+
+    dirty = await get_dirty_tables(seeded_executor, session_id)
+    assert "users" in dirty
+
+    await reset_cow_variables(seeded_executor)
+
+
+@pytest.mark.asyncio
+async def test_dirty_tables_populated_on_delete(
+    seeded_executor, session_id, operation_id
+):
+    """A DELETE within a COW session should record the table in cow_dirty_tables."""
+    await deploy_cow_functions(seeded_executor)
+    await enable_cow(seeded_executor, "users")
+
+    await apply_cow_variables(seeded_executor, session_id, operation_id)
+    await seeded_executor.execute("DELETE FROM users WHERE name = 'Bessie'")
+
+    dirty = await get_dirty_tables(seeded_executor, session_id)
+    assert "users" in dirty
+
+    await reset_cow_variables(seeded_executor)
+
+
+@pytest.mark.asyncio
+async def test_dirty_tables_cleaned_on_commit(
+    seeded_executor, session_id, operation_id
+):
+    """Committing a session should remove the table from cow_dirty_tables
+    when no changes remain."""
+    await deploy_cow_functions(seeded_executor)
+    await enable_cow(seeded_executor, "users")
+
+    await apply_cow_variables(seeded_executor, session_id, operation_id)
+    await seeded_executor.execute(
+        "INSERT INTO users (name, email) VALUES ('Hazel', 'hazel@orchard.farm')"
+    )
+    await reset_cow_variables(seeded_executor)
+
+    dirty_before = await get_dirty_tables(seeded_executor, session_id)
+    assert "users" in dirty_before
+
+    await commit_cow_session(seeded_executor, "users", session_id)
+
+    dirty_after = await get_dirty_tables(seeded_executor, session_id)
+    assert "users" not in dirty_after
+
+
+@pytest.mark.asyncio
+async def test_dirty_tables_cleaned_on_discard(
+    seeded_executor, session_id, operation_id
+):
+    """Discarding a session should remove the table from cow_dirty_tables
+    when no changes remain."""
+    await deploy_cow_functions(seeded_executor)
+    await enable_cow(seeded_executor, "users")
+
+    await apply_cow_variables(seeded_executor, session_id, operation_id)
+    await seeded_executor.execute(
+        "INSERT INTO users (name, email) VALUES ('Maple', 'maple@grove.farm')"
+    )
+    await reset_cow_variables(seeded_executor)
+
+    dirty_before = await get_dirty_tables(seeded_executor, session_id)
+    assert "users" in dirty_before
+
+    await discard_cow_session(seeded_executor, "users", session_id)
+
+    dirty_after = await get_dirty_tables(seeded_executor, session_id)
+    assert "users" not in dirty_after
+
+
+@pytest.mark.asyncio
+async def test_commit_cow_session_schema(seeded_executor, session_id, operation_id):
+    """commit_cow_session_schema should commit all dirty tables for a session."""
+    await deploy_cow_functions(seeded_executor)
+    await enable_cow_schema(seeded_executor)
+
+    await apply_cow_variables(seeded_executor, session_id, operation_id)
+    await seeded_executor.execute(
+        "INSERT INTO users (name, email) VALUES ('Ivy', 'ivy@fern.farm')"
+    )
+    await seeded_executor.execute(
+        "INSERT INTO projects (owner_id, title, description) VALUES (1, 'Garden', 'Herb garden')"
+    )
+    await reset_cow_variables(seeded_executor)
+
+    dirty = await get_dirty_tables(seeded_executor, session_id)
+    assert sorted(dirty) == ["projects", "users"]
+
+    committed = await commit_cow_session_schema(seeded_executor, session_id)
+    assert sorted(committed) == ["projects", "users"]
+
+    rows = await seeded_executor.execute("SELECT name FROM users ORDER BY id")
+    assert ("Ivy",) in rows
+
+    dirty_after = await get_dirty_tables(seeded_executor, session_id)
+    assert dirty_after == []
+
+
+@pytest.mark.asyncio
+async def test_discard_cow_session_schema(seeded_executor, session_id, operation_id):
+    """discard_cow_session_schema should discard all dirty tables for a session."""
+    await deploy_cow_functions(seeded_executor)
+    await enable_cow_schema(seeded_executor)
+
+    await apply_cow_variables(seeded_executor, session_id, operation_id)
+    await seeded_executor.execute(
+        "INSERT INTO users (name, email) VALUES ('Olive', 'olive@vineyard.farm')"
+    )
+    await seeded_executor.execute(
+        "INSERT INTO projects (owner_id, title, description) VALUES (1, 'Vineyard', 'Wine grapes')"
+    )
+    await reset_cow_variables(seeded_executor)
+
+    dirty = await get_dirty_tables(seeded_executor, session_id)
+    assert sorted(dirty) == ["projects", "users"]
+
+    discarded = await discard_cow_session_schema(seeded_executor, session_id)
+    assert sorted(discarded) == ["projects", "users"]
+
+    rows = await seeded_executor.execute("SELECT name FROM users ORDER BY id")
+    assert ("Olive",) not in rows
+
+    dirty_after = await get_dirty_tables(seeded_executor, session_id)
+    assert dirty_after == []
