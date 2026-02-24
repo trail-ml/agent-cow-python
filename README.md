@@ -44,7 +44,7 @@ See the [interactive demo](https://www.agent-cow.com) for a worked example of an
 <details>
 <summary><strong>Why Copy-on-Write for agents?</strong></summary>
 
-Alignment is an open problem in AI safety, and [misalignment during agent execution may not always be obvious](https://www.cold-takes.com/why-ai-alignment-could-be-hard-with-modern-deep-learning/). At best, a misaligned agent is annoying (ie. if the agent does something other than what the user wants it to do) and at worst, dangerous (i.e. leading to sensitive data loss, tool misuse, and [other harms](https://www.anthropic.com/research/agentic-misalignment)). Rather than tackling the alignment problem directly, this repo focuses on minimizing potential harm a misaligned agent can cause.
+Alignment is an open problem in AI safety, and [misalignment during agent execution may not always be obvious](https://www.cold-takes.com/why-ai-alignment-could-be-hard-with-modern-deep-learning/). At best, a misaligned agent is annoying (i.e. if the agent does something other than what the user wants it to do) and at worst, dangerous (i.e. leading to sensitive data loss, tool misuse, and [other harms](https://www.anthropic.com/research/agentic-misalignment)). Rather than tackling the alignment problem directly, this repo focuses on minimizing potential harm a misaligned agent can cause.
 
 - **Changes can be reviewed at the end of a session**, rather than needing to repeatedly 'accept' each action as it is executed. This minimizes the direct human supervision required while improving the safeguards in place.
 - Mistakes are less consequential, since the **agent can't write directly to the main/production data**. If some changes are good but others aren't, users can cherry-pick operations they wish to keep.
@@ -55,7 +55,7 @@ Alignment is an open problem in AI safety, and [misalignment during agent execut
 ## Backends
 | Backend | Docs | Status |
 |---------|------|--------|
-| **PostgreSQL** | [agentcow/postgres](./agentcow/postgres/) | Available |
+| **PostgreSQL** | [agentcow/postgres](https://github.com/trail-ml/agent-cow-python/tree/main/agentcow/postgres) | Available |
 | **pg-lite (TypeScript)** | [agent-cow-typescript](https://github.com/trail-ml/agent-cow-ts) | Available |
 | **Blob/File Storage** | — | In progress |
 
@@ -120,15 +120,15 @@ For parsing COW configuration from HTTP request headers (e.g. in FastAPI/Django/
 ## Development
 
 ```bash
-git clone https://github.com/trail-ml/agent-cow.git
-cd agent-cow
+git clone https://github.com/trail-ml/agent-cow-python.git
+cd agent-cow-python
 pip install -e ".[dev]"
 pytest agentcow/postgres/tests/ -v
 ```
 
 ## Contributing
 
-We welcome contributions! For questions, bug reports, or feature requests, please [open an issue](https://github.com/trail-ml/agent-cow/issues).
+We welcome contributions! For questions, bug reports, or feature requests, please [open an issue](https://github.com/trail-ml/agent-cow-python/issues).
 
 ## License
 
