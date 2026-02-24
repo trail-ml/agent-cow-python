@@ -471,6 +471,22 @@ END;
 $$;
 """
 
+GET_DIRTY_CHANGES_TABLES_SQL = """
+CREATE OR REPLACE FUNCTION _cow_dirty_changes_tables(
+    p_schema     text,
+    p_session_id uuid
+)
+RETURNS TABLE(table_name text)
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT d.table_name || '_changes' AS table_name
+    FROM cow_dirty_tables d
+    WHERE d.schema_name = p_schema
+      AND d.session_id = p_session_id;
+$$;
+"""
+
 GET_COW_DEPENDENCIES_SQL = """
 CREATE OR REPLACE FUNCTION get_cow_dependencies(
     p_schema     text,
@@ -491,10 +507,7 @@ DECLARE
     referenced_changes_table text;
 BEGIN
     FOR tbl IN
-        SELECT d.table_name || '_changes' AS table_name
-        FROM cow_dirty_tables d
-        WHERE d.schema_name = p_schema
-          AND d.session_id = p_session_id
+        SELECT t.table_name FROM _cow_dirty_changes_tables(p_schema, p_session_id) t
     LOOP
         SELECT array_agg(kcu.column_name ORDER BY kcu.ordinal_position) INTO pk_cols
         FROM information_schema.table_constraints tc
@@ -529,10 +542,7 @@ BEGIN
     END LOOP;
 
     FOR tbl IN
-        SELECT d.table_name || '_changes' AS table_name
-        FROM cow_dirty_tables d
-        WHERE d.schema_name = p_schema
-          AND d.session_id = p_session_id
+        SELECT t.table_name FROM _cow_dirty_changes_tables(p_schema, p_session_id) t
     LOOP
         base_table_name := regexp_replace(tbl.table_name, '_changes$', '');
 
@@ -623,10 +633,7 @@ DECLARE
     query text := '';
 BEGIN
     FOR tbl IN
-        SELECT d.table_name || '_changes' AS table_name
-        FROM cow_dirty_tables d
-        WHERE d.schema_name = p_schema
-          AND d.session_id = p_session_id
+        SELECT t.table_name FROM _cow_dirty_changes_tables(p_schema, p_session_id) t
     LOOP
         IF query != '' THEN
             query := query || ' UNION ALL ';

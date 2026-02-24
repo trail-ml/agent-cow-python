@@ -15,6 +15,7 @@ from .cow_sql_functions import (
     COMMIT_COW_SQL,
     DISCARD_COW_SQL,
     TEARDOWN_COW_SQL,
+    GET_DIRTY_CHANGES_TABLES_SQL,
     GET_COW_DEPENDENCIES_SQL,
     GET_SESSION_OPERATIONS_SQL,
 )
@@ -107,6 +108,7 @@ async def deploy_cow_functions(executor: Executor) -> None:
         COMMIT_COW_SQL,
         DISCARD_COW_SQL,
         TEARDOWN_COW_SQL,
+        GET_DIRTY_CHANGES_TABLES_SQL,
         GET_COW_DEPENDENCIES_SQL,
         GET_SESSION_OPERATIONS_SQL,
     ):
