@@ -40,9 +40,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/trail-ml/agent-cow"
-Repository = "https://github.com/trail-ml/agent-cow"
-Issues = "https://github.com/trail-ml/agent-cow/issues"
+Homepage = "https://github.com/trail-ml/agent-cow-python"
+Repository = "https://github.com/trail-ml/agent-cow-python"
+Issues = "https://github.com/trail-ml/agent-cow-python/issues"
 
 [tool.hatch.version]
 path = "agentcow/__init__.py"

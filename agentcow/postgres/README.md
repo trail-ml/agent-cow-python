@@ -228,5 +228,5 @@ for stmt in stmts:
 | Type | Description |
 |------|-------------|
 | `Executor` | Protocol — any object with `async execute(sql: str) -> list[tuple]` |
-| `CowRequestConfig` | Dataclass with `agent_session_id`, `operation_id`, `visible_operations` fields |
+| `CowPostgresConfig` | Dataclass with `agent_session_id`, `operation_id`, `visible_operations` fields |
 | `CowStatus` | TypedDict with `enabled`, `tables_with_cow`, `changes_tables`, `cow_functions_deployed` fields |
