@@ -23,8 +23,8 @@ from .core import (
     is_cow_enabled,
     get_cow_status,
 )
-from .session import (
-    CowRequestConfig,
+from .context import (
+    CowPostgresConfig,
     build_cow_variable_statements,
 )
 
@@ -50,6 +50,6 @@ __all__ = [
     "reset_cow_variables",
     "is_cow_enabled",
     "get_cow_status",
-    "CowRequestConfig",
+    "CowPostgresConfig",
     "build_cow_variable_statements",
 ]
