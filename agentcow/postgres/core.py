@@ -41,7 +41,7 @@ from .operations import (
     set_visible_operations_sql,
     get_dirty_tables_sql,
 )
-from .session import CowRequestConfig, build_cow_variable_statements
+from .context import CowPostgresConfig, build_cow_variable_statements
 
 
 @runtime_checkable
@@ -410,7 +410,7 @@ async def reset_cow_variables(executor: Executor) -> None:
 
 async def is_cow_enabled(
     executor: Executor,
-    config: CowRequestConfig,
+    config: CowPostgresConfig,
     schema: str = "public",
 ) -> bool:
     """Check whether CoW is both requested and properly configured.
@@ -418,7 +418,7 @@ async def is_cow_enabled(
     Returns ``True`` only when the request carries a session ID *and* the
     database has the CoW functions deployed with at least one CoW-enabled table.
     """
-    if not config.is_cow_requested:
+    if not config.is_active:
         return False
 
     func_rows = await executor.execute(check_cow_functions_deployed_sql())

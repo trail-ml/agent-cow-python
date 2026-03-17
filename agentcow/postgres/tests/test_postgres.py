@@ -6,7 +6,7 @@ import pytest
 
 from agentcow.postgres import (
     Executor,
-    CowRequestConfig,
+    CowPostgresConfig,
     build_cow_variable_statements,
     deploy_cow_functions,
     enable_cow,
@@ -32,24 +32,24 @@ def test_executor_protocol_is_runtime_checkable():
 
 
 def test_cow_request_config_defaults():
-    """A default CowRequestConfig should have COW disabled and all
+    """A default CowPostgresConfig should have COW disabled and all
     IDs set to None."""
-    config = CowRequestConfig()
-    assert config.agent_session_id is None
+    config = CowPostgresConfig()
+    assert config.session_id is None
     assert config.operation_id is None
     assert config.visible_operations is None
-    assert config.is_cow_requested is False
+    assert config.is_active is False
 
 
 def test_cow_request_config_requested(session_id, operation_id):
     """Providing a session_id and operation_id should mark the config
     as COW-requested."""
-    config = CowRequestConfig(
-        agent_session_id=session_id,
+    config = CowPostgresConfig(
+        session_id=session_id,
         operation_id=operation_id,
     )
-    assert config.is_cow_requested is True
-    assert config.agent_session_id == session_id
+    assert config.is_active is True
+    assert config.session_id == session_id
 
 
 def test_build_cow_variable_statements(session_id, operation_id):
@@ -89,7 +89,7 @@ async def test_is_cow_enabled_no_session(seeded_executor):
     even if the database is fully configured."""
     await deploy_cow_functions(seeded_executor)
     await enable_cow(seeded_executor, "users")
-    config = CowRequestConfig()
+    config = CowPostgresConfig()
     assert await is_cow_enabled(seeded_executor, config) is False
 
 
@@ -97,7 +97,7 @@ async def test_is_cow_enabled_no_session(seeded_executor):
 async def test_is_cow_enabled_no_functions(seeded_executor, session_id):
     """is_cow_enabled returns False when the CoW functions haven't been
     deployed, even if a session ID is provided."""
-    config = CowRequestConfig(agent_session_id=session_id)
+    config = CowPostgresConfig(session_id=session_id)
     assert await is_cow_enabled(seeded_executor, config) is False
 
 
@@ -107,7 +107,7 @@ async def test_is_cow_enabled_fully_configured(seeded_executor, session_id):
     session ID and the database has CoW functions + tables configured."""
     await deploy_cow_functions(seeded_executor)
     await enable_cow(seeded_executor, "users")
-    config = CowRequestConfig(agent_session_id=session_id)
+    config = CowPostgresConfig(session_id=session_id)
     assert await is_cow_enabled(seeded_executor, config) is True
 
 

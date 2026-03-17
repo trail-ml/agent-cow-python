@@ -1,31 +1,27 @@
 """
-COW session management.
-
-Building the SQL statements that configure session-level variables.
+SQL COW session configuration.
 
 No driver-specific imports — only standard Python.
 """
 
+from __future__ import annotations
+
 import uuid
 from dataclasses import dataclass
-from .operations import _validate_uuid
+
+from agentcow.context import CowConfig
+from agentcow.postgres.operations import _validate_uuid
 
 
 @dataclass
-class CowRequestConfig:
-    """Configuration for a COW session."""
+class CowPostgresConfig(CowConfig):
+    """Configuration for a SQL COW session."""
 
-    agent_session_id: uuid.UUID | None = None
-    operation_id: uuid.UUID | None = None
     visible_operations: list[uuid.UUID] | None = None
-
-    @property
-    def is_cow_requested(self) -> bool:
-        return self.agent_session_id is not None
 
     def to_session_kwargs(self) -> dict:
         return {
-            "agent_session_id": self.agent_session_id,
+            "agent_session_id": self.session_id,
             "operation_id": self.operation_id,
             "visible_operations": self.visible_operations,
         }
@@ -38,7 +34,7 @@ def build_cow_variable_statements(
 ) -> list[str]:
     """Build SQL statements for setting COW session variables.
 
-    Returns a list of ``SET LOCAL …`` strings ready for any driver.
+    Returns a list of ``SET LOCAL ...`` strings ready for any driver.
     """
     statements = [f"SET LOCAL app.session_id = '{_validate_uuid(agent_session_id)}'"]
 
