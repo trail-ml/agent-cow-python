@@ -38,7 +38,7 @@ def test_cow_request_config_defaults():
     assert config.session_id is None
     assert config.operation_id is None
     assert config.visible_operations is None
-    assert config.is_cow_requested is False
+    assert config.is_active is False
 
 
 def test_cow_request_config_requested(session_id, operation_id):
@@ -48,7 +48,7 @@ def test_cow_request_config_requested(session_id, operation_id):
         session_id=session_id,
         operation_id=operation_id,
     )
-    assert config.is_cow_requested is True
+    assert config.is_active is True
     assert config.session_id == session_id
 
 

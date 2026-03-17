@@ -43,7 +43,7 @@ class CowHeaderConfig:
     visible_operations: list[uuid.UUID] | None = None
 
     @property
-    def is_cow_requested(self) -> bool:
+    def is_active(self) -> bool:
         return self.session_id is not None
 
 
@@ -101,7 +101,7 @@ def parse_cow_headers(request) -> CowHeaderConfig:
 #     async def cow_middleware(request: Request, call_next):
 #         config = parse_cow_headers(request)
 #
-#         if config.is_cow_requested:
+#         if config.is_active:
 #             executor = get_executor_from_request(request)
 #             await apply_cow_variables(
 #                 executor,
