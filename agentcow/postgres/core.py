@@ -418,7 +418,7 @@ async def is_cow_enabled(
     Returns ``True`` only when the request carries a session ID *and* the
     database has the CoW functions deployed with at least one CoW-enabled table.
     """
-    if not config.is_cow_requested:
+    if not config.is_active:
         return False
 
     func_rows = await executor.execute(check_cow_functions_deployed_sql())

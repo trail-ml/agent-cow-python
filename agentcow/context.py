@@ -22,5 +22,5 @@ class CowConfig:
     operation_id: uuid.UUID | None = None
 
     @property
-    def is_cow_requested(self) -> bool:
+    def is_active(self) -> bool:
         return self.session_id is not None
