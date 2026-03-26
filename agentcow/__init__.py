@@ -5,3 +5,5 @@ __version__ = "0.1.3"
 from .context import CowConfig
 
 __all__ = ["CowConfig"]
+
+# blob subpackage available via `from agentcow.blob import ...`
