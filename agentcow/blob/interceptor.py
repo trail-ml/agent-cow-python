@@ -19,12 +19,20 @@ import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 from .context import CowBlobConfig, CowBlobRecord
 from .paths import cow_session_prefix, parse_cow_key, to_cow_path, to_tombstone_path
 
 logger = logging.getLogger(__name__)
+
+
+class ListedCowEntry(NamedTuple):
+    final_path: str
+    op_id: uuid.UUID
+    is_delete: bool
+    last_modified: datetime
+    s3_key: str
 
 
 @contextmanager
@@ -192,19 +200,29 @@ class CowBlobInterceptor:
         )
         paginator = self._s3_client.get_paginator("list_objects_v2")
 
-        entries: list[tuple[str, uuid.UUID, bool, datetime]] = []
+        entries: list[ListedCowEntry] = []
         for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
             for obj in page.get("Contents", []):
                 parsed = parse_cow_key(obj["Key"], prefix, ctx.path_prefix)
                 if parsed is None:
                     continue
                 op_id, final_path, is_delete = parsed
-                entries.append((final_path, op_id, is_delete, obj["LastModified"]))
+                entries.append(
+                    ListedCowEntry(
+                        final_path=final_path,
+                        op_id=op_id,
+                        is_delete=is_delete,
+                        last_modified=obj["LastModified"],
+                        s3_key=obj["Key"],
+                    )
+                )
 
-        entries.sort(key=lambda e: e[3])
+        entries.sort(key=lambda e: (e.last_modified, e.s3_key))
 
-        for final_path, op_id, is_delete, _ in entries:
-            ctx.file_history.setdefault(final_path, []).append((op_id, is_delete))
+        for entry in entries:
+            ctx.file_history.setdefault(entry.final_path, []).append(
+                (entry.op_id, entry.is_delete)
+            )
 
     def _resolve_read_path(self, ctx: CowBlobConfig, object_name: str) -> Optional[str]:
         """Return the path to read from, or None if deleted in this session."""

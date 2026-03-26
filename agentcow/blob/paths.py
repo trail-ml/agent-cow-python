@@ -90,6 +90,9 @@ def parse_cow_key(
 ) -> tuple[uuid.UUID, str, bool] | None:
     """Parse a COW S3 key into (operation_id, final_path, is_delete).
 
+    ``path_prefix`` is concatenated with the key's relative path; include a
+    trailing ``/`` when production keys live under a directory (e.g. ``data/``).
+
     Returns None for keys that aren't blobs or tombstones (e.g. old manifests).
 
     Expected formats::
