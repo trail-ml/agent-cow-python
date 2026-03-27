@@ -1,5 +1,4 @@
 import uuid
-from datetime import datetime, timezone
 
 from agentcow.blob.operations import (
     commit_cow_blobs,
@@ -7,6 +6,7 @@ from agentcow.blob.operations import (
     get_blob_dependencies,
     get_blob_operation_diff,
     get_blob_session_operations,
+    get_blob_session_records,
 )
 from agentcow.blob.paths import to_cow_path, to_tombstone_path
 
@@ -43,6 +43,37 @@ class TestGetBlobSessionOperations:
     def test_empty_session(self, backend, session_id):
         ops = get_blob_session_operations(backend, BUCKET, PREFIX, NS, session_id)
         assert ops == []
+
+
+class TestGetBlobSessionRecords:
+    def test_returns_records_for_all_matching_operations(self, backend, session_id):
+        op1 = uuid.uuid4()
+        op2 = uuid.uuid4()
+        _seed_cow_write(backend, session_id, op1, "a.txt", "a")
+        _seed_cow_tombstone(backend, session_id, op2, "b.txt")
+
+        records = get_blob_session_records(backend, BUCKET, PREFIX, NS, session_id)
+
+        assert len(records) == 2
+        assert {record.operation_id for record in records} == {op1, op2}
+        assert {record.final_path for record in records} == {
+            "data/a.txt",
+            "data/b.txt",
+        }
+
+    def test_filters_by_operation_ids(self, backend, session_id):
+        op1 = uuid.uuid4()
+        op2 = uuid.uuid4()
+        _seed_cow_write(backend, session_id, op1, "a.txt", "a")
+        _seed_cow_write(backend, session_id, op2, "b.txt", "b")
+
+        records = get_blob_session_records(
+            backend, BUCKET, PREFIX, NS, session_id, operation_ids=[op1]
+        )
+
+        assert len(records) == 1
+        assert records[0].operation_id == op1
+        assert records[0].final_path == "data/a.txt"
 
 
 class TestCommitCowBlobs:
@@ -157,9 +188,7 @@ class TestDiscardCowBlobs:
         key1 = _seed_cow_write(backend, session_id, op1, "a.txt", "a")
         key2 = _seed_cow_write(backend, session_id, op2, "b.txt", "b")
 
-        discard_cow_blobs(
-            backend, BUCKET, PREFIX, NS, session_id, operation_ids=[op1]
-        )
+        discard_cow_blobs(backend, BUCKET, PREFIX, NS, session_id, operation_ids=[op1])
         assert backend.blob_exists(BUCKET, key1) is False
         assert backend.blob_exists(BUCKET, key2) is True
 
@@ -221,9 +250,7 @@ class TestGetBlobOperationDiff:
         op_id = uuid.uuid4()
         _seed_cow_write(backend, session_id, op_id, "new.txt", "new-content")
 
-        diff = get_blob_operation_diff(
-            backend, BUCKET, PREFIX, NS, session_id, op_id
-        )
+        diff = get_blob_operation_diff(backend, BUCKET, PREFIX, NS, session_id, op_id)
         assert diff.is_new_file is True
         assert diff.after_content == "new-content"
         assert diff.before_content is None
@@ -235,9 +262,7 @@ class TestGetBlobOperationDiff:
         op_id = uuid.uuid4()
         _seed_cow_write(backend, session_id, op_id, "file.txt", "updated")
 
-        diff = get_blob_operation_diff(
-            backend, BUCKET, PREFIX, NS, session_id, op_id
-        )
+        diff = get_blob_operation_diff(backend, BUCKET, PREFIX, NS, session_id, op_id)
         assert diff.before_content == "original"
         assert diff.after_content == "updated"
         assert diff.is_new_file is False
@@ -251,9 +276,7 @@ class TestGetBlobOperationDiff:
         op_id = uuid.uuid4()
         _seed_cow_write(backend, session_id, op_id, "file.txt", "unchanged")
 
-        diff = get_blob_operation_diff(
-            backend, BUCKET, PREFIX, NS, session_id, op_id
-        )
+        diff = get_blob_operation_diff(backend, BUCKET, PREFIX, NS, session_id, op_id)
         assert diff.after_content == "unchanged"
         assert diff.before_content is None
         assert diff.is_new_file is True
@@ -265,9 +288,7 @@ class TestGetBlobOperationDiff:
         op_id = uuid.uuid4()
         _seed_cow_tombstone(backend, session_id, op_id, "gone.txt")
 
-        diff = get_blob_operation_diff(
-            backend, BUCKET, PREFIX, NS, session_id, op_id
-        )
+        diff = get_blob_operation_diff(backend, BUCKET, PREFIX, NS, session_id, op_id)
         assert diff.is_delete is True
         assert diff.after_content is None
 
@@ -286,9 +307,7 @@ class TestGetBlobOperationDiff:
         _seed_cow_write(backend, session_id, op1, "file.txt", "first")
         _seed_cow_write(backend, session_id, op2, "file.txt", "second")
 
-        diff = get_blob_operation_diff(
-            backend, BUCKET, PREFIX, NS, session_id, op2
-        )
+        diff = get_blob_operation_diff(backend, BUCKET, PREFIX, NS, session_id, op2)
         assert diff.before_content == "first"
         assert diff.after_content == "second"
         assert diff.is_new_file is False
