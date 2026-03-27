@@ -84,14 +84,17 @@ After the session, inspect what the agent did and selectively commit or discard:
 ```python
 from agentcow.blob import (
     get_blob_session_operations,
+    get_blob_session_records,
     get_blob_dependencies,
     commit_cow_blobs,
     discard_cow_blobs,
 )
 
 ops = get_blob_session_operations(backend, bucket, prefix, ".cow", session_id)
+records = get_blob_session_records(backend, bucket, prefix, ".cow", session_id)
 deps = get_blob_dependencies(backend, bucket, prefix, ".cow", session_id)
 # ops:  [UUID('aaa...'), UUID('bbb...'), UUID('ccc...')]
+# records: [CowBlobRecord(final_path='org/file.txt', ...), ...]
 # deps: [(UUID('aaa...'), UUID('bbb...')), ...]  — bbb depends on aaa
 
 # Cherry-pick: commit the good operations, discard the rest
@@ -149,6 +152,7 @@ When two operations touch the same file, a dependency edge `(earlier_op, later_o
 | Function | Description |
 |----------|-------------|
 | `get_blob_session_operations(backend, bucket, prefix, ns, session_id)` | List all uncommitted blob operation UUIDs for a session |
+| `get_blob_session_records(backend, bucket, prefix, ns, session_id, operation_ids=None)` | Return `CowBlobRecord` entries for the session, optionally scoped to specific operations |
 | `get_blob_dependencies(backend, bucket, prefix, ns, session_id)` | Get `(depends_on, operation_id)` pairs for blob operations in a session |
 | `get_blob_operation_diff(backend, bucket, prefix, ns, session_id, operation_id)` | Compute before/after content diff for a single operation |
 

@@ -73,6 +73,25 @@ def get_blob_session_operations(
     return ops
 
 
+def get_blob_session_records(
+    backend,
+    manifest_bucket: str,
+    path_prefix: str,
+    scratch_namespace: str,
+    session_id: uuid.UUID,
+    operation_ids: list[uuid.UUID] | None = None,
+) -> list[CowBlobRecord]:
+    """Return blob operation records for a COW session."""
+    return _load_records_from_keys(
+        backend,
+        manifest_bucket,
+        path_prefix,
+        scratch_namespace,
+        session_id,
+        operation_ids,
+    )
+
+
 def get_blob_dependencies(
     backend,
     manifest_bucket: str,
