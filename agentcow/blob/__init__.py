@@ -7,6 +7,7 @@ from .operations import (
     get_blob_dependencies,
     get_blob_operation_diff,
     get_blob_session_operations,
+    get_blob_session_records,
 )
 from .context import (
     BlobOperationDiff,
@@ -23,6 +24,7 @@ __all__ = [
     "get_blob_dependencies",
     "get_blob_operation_diff",
     "get_blob_session_operations",
+    "get_blob_session_records",
     "BlobOperationDiff",
     "CowBlobConfig",
     "CowBlobRecord",
