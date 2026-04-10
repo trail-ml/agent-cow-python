@@ -41,3 +41,5 @@ jobs:
       - run: pip install -e ".[dev]"
 
       - run: pytest agentcow/postgres/tests/ -v
+
+      - run: pytest agentcow/blob/tests/ -v
