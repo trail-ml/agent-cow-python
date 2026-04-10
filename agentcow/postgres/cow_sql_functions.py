@@ -67,6 +67,7 @@ DECLARE
     base_table_owner     text;
     base_on_conflict     text;
     changes_on_conflict  text;
+    r                    RECORD;
 BEGIN
     pk_cols_quoted := (SELECT string_agg(quote_ident(col), ', ') FROM unnest(p_pk_cols) col);
     pk_join_condition := (SELECT string_agg(format('c2.%I = b.%I', col, col), ' AND ') FROM unnest(p_pk_cols) col);
@@ -103,6 +104,24 @@ BEGIN
         changes_table_name || '_session_pk_idx',
         qual_changes, pk_cols_quoted
     );
+
+    -- 1b. Make FK constraints on the base table deferrable so that
+    --     multi-table COW commits can defer cross-table checks.
+    FOR r IN
+        SELECT con.conname
+        FROM pg_constraint con
+        JOIN pg_class cls ON con.conrelid = cls.oid
+        JOIN pg_namespace ns ON cls.relnamespace = ns.oid
+        WHERE con.contype = 'f'
+          AND ns.nspname = p_schema
+          AND cls.relname = p_base_table
+          AND NOT con.condeferrable
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE %s ALTER CONSTRAINT %I DEFERRABLE INITIALLY IMMEDIATE',
+            qual_base, r.conname
+        );
+    END LOOP;
 
     -- 2. Build column lists from the base table
     SELECT

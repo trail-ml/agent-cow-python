@@ -8,6 +8,7 @@ from agentcow.postgres import (
     Executor,
     CowPostgresConfig,
     build_cow_variable_statements,
+    deferred_fk_constraints,
     deploy_cow_functions,
     enable_cow,
     disable_cow,
@@ -449,3 +450,210 @@ async def test_discard_cow_session_schema(seeded_executor, session_id, operation
 
     dirty_after = await get_dirty_tables(seeded_executor, session_id)
     assert dirty_after == []
+
+
+# ---------------------------------------------------------------------------
+# FK-relationship commit tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_commit_schema_with_new_fk_referenced_rows(
+    seeded_executor, session_id, operation_id
+):
+    """Committing a schema where a COW-inserted row references another
+    COW-inserted row via FK should succeed.
+
+    This is the scenario that was broken before deferred FK constraints:
+    a new user is created in the session, then a project referencing that
+    new user is also created.  If 'projects' is committed before 'users',
+    the FK check would fail without deferral.
+    """
+    await deploy_cow_functions(seeded_executor)
+    await enable_cow_schema(seeded_executor)
+
+    await apply_cow_variables(seeded_executor, session_id, operation_id)
+    await seeded_executor.execute(
+        "INSERT INTO users (id, name, email) VALUES (100, 'Petunia', 'petunia@hilltop.farm')"
+    )
+    await seeded_executor.execute(
+        "INSERT INTO projects (owner_id, title, description) "
+        "VALUES (100, 'Hilltop Garden', 'Herb garden on the hilltop')"
+    )
+    await reset_cow_variables(seeded_executor)
+
+    committed = await commit_cow_session_schema(seeded_executor, session_id)
+    assert sorted(committed) == ["projects", "users"]
+
+    rows = await seeded_executor.execute(
+        "SELECT name FROM users WHERE id = 100"
+    )
+    assert rows == [("Petunia",)]
+
+    rows = await seeded_executor.execute(
+        "SELECT title FROM projects WHERE owner_id = 100"
+    )
+    assert rows == [("Hilltop Garden",)]
+
+
+@pytest.mark.asyncio
+async def test_commit_schema_with_cascading_fk_across_three_tables(
+    seeded_executor, session_id, operation_id
+):
+    """A full chain: new user -> new project (refs user) -> new task (refs
+    project and user).  All created within a single COW session and committed
+    via commit_cow_session_schema.  Without deferred constraints the commit
+    would fail because tasks references both projects and users."""
+    await deploy_cow_functions(seeded_executor)
+    await enable_cow_schema(seeded_executor)
+
+    await apply_cow_variables(seeded_executor, session_id, operation_id)
+    await seeded_executor.execute(
+        "INSERT INTO users (id, name, email) "
+        "VALUES (200, 'Clover', 'clover@greenacre.farm')"
+    )
+    await seeded_executor.execute(
+        "INSERT INTO projects (id, owner_id, title, description) "
+        "VALUES (200, 200, 'Green Acres', 'Organic vegetables')"
+    )
+    await seeded_executor.execute(
+        "INSERT INTO tasks (project_id, assigned_to, title) "
+        "VALUES (200, 200, 'Plant seeds')"
+    )
+    await reset_cow_variables(seeded_executor)
+
+    dirty = await get_dirty_tables(seeded_executor, session_id)
+    assert sorted(dirty) == ["projects", "tasks", "users"]
+
+    committed = await commit_cow_session_schema(seeded_executor, session_id)
+    assert sorted(committed) == ["projects", "tasks", "users"]
+
+    rows = await seeded_executor.execute("SELECT name FROM users WHERE id = 200")
+    assert rows == [("Clover",)]
+
+    rows = await seeded_executor.execute("SELECT title FROM projects WHERE id = 200")
+    assert rows == [("Green Acres",)]
+
+    rows = await seeded_executor.execute(
+        "SELECT title FROM tasks WHERE project_id = 200"
+    )
+    assert rows == [("Plant seeds",)]
+
+
+@pytest.mark.asyncio
+async def test_commit_single_table_with_fk_to_existing_row(
+    seeded_executor, session_id, operation_id
+):
+    """Committing a single table where the FK target already exists in the
+    base table should work without deferral (baseline sanity check)."""
+    await deploy_cow_functions(seeded_executor)
+    await enable_cow(seeded_executor, "projects")
+
+    await apply_cow_variables(seeded_executor, session_id, operation_id)
+    await seeded_executor.execute(
+        "INSERT INTO projects (owner_id, title, description) "
+        "VALUES (1, 'Sunflower Field', 'Annual sunflower planting')"
+    )
+    await reset_cow_variables(seeded_executor)
+
+    await commit_cow_session(seeded_executor, "projects", session_id)
+
+    rows = await seeded_executor.execute(
+        "SELECT title FROM projects WHERE title = 'Sunflower Field'"
+    )
+    assert rows == [("Sunflower Field",)]
+
+
+@pytest.mark.asyncio
+async def test_enable_cow_makes_fk_constraints_deferrable(seeded_executor):
+    """After enable_cow, FK constraints on the base table should be marked
+    as DEFERRABLE so that SET CONSTRAINTS ALL DEFERRED can work."""
+    await deploy_cow_functions(seeded_executor)
+    await enable_cow(seeded_executor, "projects")
+
+    rows = await seeded_executor.execute(
+        "SELECT con.conname, con.condeferrable "
+        "FROM pg_constraint con "
+        "JOIN pg_class cls ON con.conrelid = cls.oid "
+        "JOIN pg_namespace ns ON cls.relnamespace = ns.oid "
+        "WHERE con.contype = 'f' "
+        "  AND ns.nspname = 'public' "
+        "  AND cls.relname = 'projects_base'"
+    )
+    assert len(rows) > 0, "projects_base should have at least one FK constraint"
+    for conname, condeferrable in rows:
+        assert condeferrable is True, (
+            f"FK constraint {conname} on projects_base should be deferrable"
+        )
+
+
+@pytest.mark.asyncio
+async def test_enable_cow_makes_multi_hop_fk_deferrable(seeded_executor):
+    """tasks -> projects -> users: both levels of FK should become deferrable."""
+    await deploy_cow_functions(seeded_executor)
+    await enable_cow_schema(seeded_executor)
+
+    for base_table in ("tasks_base", "projects_base"):
+        rows = await seeded_executor.execute(
+            "SELECT con.conname, con.condeferrable "
+            "FROM pg_constraint con "
+            "JOIN pg_class cls ON con.conrelid = cls.oid "
+            "JOIN pg_namespace ns ON cls.relnamespace = ns.oid "
+            "WHERE con.contype = 'f' "
+            f"  AND ns.nspname = 'public' AND cls.relname = '{base_table}'"
+        )
+        for conname, condeferrable in rows:
+            assert condeferrable is True, (
+                f"FK constraint {conname} on {base_table} should be deferrable"
+            )
+
+
+@pytest.mark.asyncio
+async def test_deferred_fk_constraints_context_manager(seeded_executor):
+    """The deferred_fk_constraints context manager should defer and then
+    re-enable FK constraint checks."""
+    await deploy_cow_functions(seeded_executor)
+    await enable_cow_schema(seeded_executor)
+
+    async with deferred_fk_constraints(seeded_executor):
+        await seeded_executor.execute(
+            "INSERT INTO projects_base (id, owner_id, title, description) "
+            "VALUES (999, 999, 'Phantom Project', 'References non-existent user')"
+        )
+        await seeded_executor.execute(
+            "INSERT INTO users_base (id, name, email) "
+            "VALUES (999, 'Ghost', 'ghost@phantom.farm')"
+        )
+
+    rows = await seeded_executor.execute(
+        "SELECT title FROM projects_base WHERE id = 999"
+    )
+    assert rows == [("Phantom Project",)]
+    rows = await seeded_executor.execute(
+        "SELECT name FROM users_base WHERE id = 999"
+    )
+    assert rows == [("Ghost",)]
+
+
+@pytest.mark.asyncio
+async def test_commit_schema_delete_and_reinsert_with_fk(
+    seeded_executor, session_id, operation_id
+):
+    """Deleting a user and reinserting with the same ID, while a project
+    still references that user, should commit cleanly with deferral."""
+    await deploy_cow_functions(seeded_executor)
+    await enable_cow_schema(seeded_executor)
+
+    await apply_cow_variables(seeded_executor, session_id, operation_id)
+    await seeded_executor.execute("DELETE FROM users WHERE id = 1")
+    await seeded_executor.execute(
+        "INSERT INTO users (id, name, email) "
+        "VALUES (1, 'Bessie Jr', 'bessiejr@sunnymeadow.farm')"
+    )
+    await reset_cow_variables(seeded_executor)
+
+    committed = await commit_cow_session_schema(seeded_executor, session_id)
+    assert "users" in committed
+
+    rows = await seeded_executor.execute("SELECT name FROM users WHERE id = 1")
+    assert rows == [("Bessie Jr",)]

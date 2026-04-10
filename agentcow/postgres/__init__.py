@@ -3,6 +3,7 @@
 from .core import (
     CowStatus,
     Executor,
+    deferred_fk_constraints,
     deploy_cow_functions,
     enable_cow,
     disable_cow,
@@ -31,6 +32,7 @@ from .context import (
 __all__ = [
     "CowStatus",
     "Executor",
+    "deferred_fk_constraints",
     "deploy_cow_functions",
     "enable_cow",
     "disable_cow",

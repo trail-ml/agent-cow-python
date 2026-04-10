@@ -6,7 +6,8 @@ All functions accept a generic ``Executor`` — no ORM or driver dependency.
 """
 
 import uuid
-from typing import Any, Protocol, TypedDict, runtime_checkable
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Protocol, TypedDict, runtime_checkable
 
 from .cow_sql_functions import (
     COW_CHANGES_TABLE_NAME_SQL,
@@ -92,6 +93,19 @@ async def _get_pk_cols(executor: Executor, schema: str, table_name: str) -> list
     if not pk_cols:
         raise ValueError(f"Table {table_name} in schema {schema} has no primary key.")
     return pk_cols
+
+
+@asynccontextmanager
+async def deferred_fk_constraints(executor: Executor) -> AsyncIterator[None]:
+    """Defer FK constraint checks for the duration of the block.
+
+    Use this around multi-table commit loops so that cross-table FK
+    references are validated only after all tables have been committed.
+    Requires FK constraints to be ``DEFERRABLE INITIALLY IMMEDIATE``.
+    """
+    await executor.execute("SET CONSTRAINTS ALL DEFERRED")
+    yield
+    await executor.execute("SET CONSTRAINTS ALL IMMEDIATE")
 
 
 # ---------------------------------------------------------------------------
@@ -283,8 +297,9 @@ async def commit_cow_session_schema(
     Returns the list of table names that were committed.
     """
     tables = await get_dirty_tables(executor, session_id, schema)
-    for table_name in tables:
-        await commit_cow_session(executor, table_name, session_id, schema=schema)
+    async with deferred_fk_constraints(executor):
+        for table_name in tables:
+            await commit_cow_session(executor, table_name, session_id, schema=schema)
     return tables
 
 
