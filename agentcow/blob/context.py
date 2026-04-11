@@ -22,7 +22,6 @@ class CowBlobRecord:
     bucket_name: str = ""
     cow_path: str = ""
     operation_id: uuid.UUID | None = None
-    group_key: str | None = None
 
 
 @dataclass
@@ -46,7 +45,6 @@ class CowBlobConfig(CowConfig):
 
     path_prefix: str = ""
     scratch_namespace: str = ".cow"
-    group_key: str | None = None
     pending_writes: list[CowBlobRecord] = field(default_factory=list)
     dependencies: list[tuple[uuid.UUID, uuid.UUID]] = field(default_factory=list)
     file_history: dict[str, list[tuple[uuid.UUID, bool, str]]] = field(
