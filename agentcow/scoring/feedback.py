@@ -4,18 +4,16 @@ Default LLM-consumable feedback report for COW session scoring.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from .sample_scorers import f1, precision, recall
-
-if TYPE_CHECKING:
-    from .scorer import ScoringResult
+from .types import ScoringResult
 
 
 MATCHED_ATTENTION_THRESHOLD = 0.9
 
 
-def default_feedback_fn(result: "ScoringResult") -> str:
+def default_feedback_fn(result: ScoringResult) -> str:
     terms = result.terms
     lines: list[str] = ["SCORING FEEDBACK REPORT", "", "== Scores =="]
     for name, value in result.scores.items():
@@ -73,7 +71,9 @@ def default_feedback_fn(result: "ScoringResult") -> str:
         for extra_write in result.extra_writes:
             agent = extra_write.agent
             action = "DELETE" if agent.is_delete else "WRITE"
-            lines.append(f"[{agent.table_name} {action} {_format_pk(agent.primary_key)}]")
+            lines.append(
+                f"[{agent.table_name} {action} {_format_pk(agent.primary_key)}]"
+            )
             if extra_write.feedback:
                 lines.append(f"  {extra_write.feedback}")
 

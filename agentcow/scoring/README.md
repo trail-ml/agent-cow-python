@@ -2,7 +2,10 @@
 
 **Score an agent's COW session against a ground truth recording.**
 
-Answers two questions: *did the agent produce the right world state?* and *did the agent do it efficiently?*
+Answers two questions at two levels:
+
+- **Session level** — *did the agent produce the right world state?* (structural + content scores) and *did the agent do it efficiently?* (op count and waste).
+- **Operation level** — for each individual agent op, *did this step move the world closer to GT?* (`structural_utility`) and *were the values this step wrote correct?* (`content_utility`).
 
 ## Install
 
@@ -38,14 +41,13 @@ That's it. `score_cow_sessions` pulls both sessions from the COW `*_changes` tab
 When you don't pass a `ScoringConfig`, `result.scores["overall"]` is computed by `default_score_fn`:
 
 ```
-overall = structural_score        * 0.4    # did the agent write to the right rows?
-        + content_score           * 0.2    # were the field values correct?
-        + clamp01(sum_struct_util) * 0.1    # was each step productive?
-        + avg_content_utility     * 0.1    # was each step filling in correct values?
-        + efficiency              * 0.2    # reasonable number of ops, no wasted work?
+overall = structural_score    * 0.5    # did the agent write to the right rows?
+        + content_score       * 0.2    # were the field values correct?
+        + avg_content_utility * 0.1    # was each step filling in correct values?
+        + efficiency          * 0.2    # reasonable number of ops, no wasted work?
 ```
 
-A perfect session hits `1.0`. Each term is a raw signal exposed on `result.terms` — see below.
+Weights sum to 1, and each term is in `[0, 1]`, so a perfect session hits exactly `1.0`. Each term is a raw signal exposed on `result.terms` — see below.
 
 ## Using Your Own Score
 
@@ -68,7 +70,57 @@ result = await score_cow_sessions(
 )
 ```
 
-`sample_scorers.py` ships ready-made reducers you can register by name: `default_score_fn`, `precision`, `recall`, `f1`.
+`sample_scorers.py` ships ready-made `ScoreFn`s you can register by name: `default_score_fn`, `precision`, `recall`, `f1`.
+
+## Custom per-table similarity
+
+`ScoreFn`s only reweight *already-aggregated* signals (eg. extra_row_count, matched_row_count) — by the time one runs, every row has already been matched and compared. Writing a full `WriteComparator` reaches earlier in the pipeline but forces you to reimplement FK remapping, field-level dispatch, and structured result objects just to change one rule.
+
+You can use a `row_similarity` function to override **how similar two rows are** for a given table:
+
+```python
+from agentcow.scoring import ScoringConfig, score_cow_sessions
+
+def issues_similar(gt: dict, agent: dict) -> bool:
+    return (
+        gt["name"].strip().lower() == agent["name"].strip().lower()
+        and gt["state_id"] == agent["state_id"]
+    )
+
+result = await score_cow_sessions(
+    executor=executor,
+    ground_truth_session_id=gt_id,
+    agent_session_id=agent_id,
+    schema="public",
+    config=ScoringConfig(
+        row_similarity={"issues": issues_similar},
+    ),
+)
+```
+
+The callable takes two plain dicts and returns `bool` (exact match / no match → 1.0 / 0.0), `float` (graded similarity in `[0, 1]`), or `SimilarityResult` (for custom feedback / per-field breakdown). Foreign-key UUIDs on the agent side are automatically remapped into GT space before your function runs, so direct `==` on FK columns works without thinking about UUID mapping.
+
+Assertion-style helpers drop in unchanged — an `AssertionError` raised inside the function is caught and becomes mismatch feedback:
+
+```python
+def issues_similar(gt, agent):
+    assert gt["name"] == agent["name"], f"name differs: {gt['name']!r} vs {agent['name']!r}"
+    assert gt["state_id"] == agent["state_id"], "wrong state"
+    return True
+```
+
+Graded similarity when a boolean is too blunt:
+
+```python
+from difflib import SequenceMatcher
+
+def issues_similar(gt, agent) -> float:
+    name_sim = SequenceMatcher(None, gt["name"], agent["name"]).ratio()
+    state_match = 1.0 if gt["state_id"] == agent["state_id"] else 0.0
+    return 0.6 * name_sim + 0.4 * state_match
+```
+
+`row_similarity` is the recommended hook for per-table customization. The fuller `WriteComparator` protocol (`CompositeComparator(table_comparators=...)`) is still available when you need access to `FieldConfig`, UUID mapping state, or want to emit structured per-field results.
 
 ## What's in `result`
 
@@ -118,11 +170,15 @@ from agentcow.scoring import ScoringConfig, CompositeComparator
 ScoringConfig(
     score_fns={"overall": my_score_fn},  # default: {"overall": default_score_fn}
     feedback_fn=my_feedback_fn,          # default: default_feedback_fn (LLM-ready narrative)
-    comparator=CompositeComparator(      # default: DatatypeComparator (type-driven)
+    row_similarity={                     # per-table (gt_row, agent_row) -> bool|float
+        "issues": my_issues_similar,
+    },
+    comparator=CompositeComparator(      # escape hatch: full WriteComparator protocol
         table_comparators={"my_table": MyTableComparator()},
     ),
     collapse=False,                      # True → evaluate final state only (pure outcome)
     match_threshold=0.8,                 # similarity cutoff for binary match/no-match
+    exact_match_threshold=0.9999,        # pass-1 lock-in cutoff for near-perfect pairings
     ignored_fields={"updated_at"},       # fields to skip during comparison
 )
 ```
@@ -140,6 +196,7 @@ from agentcow.scoring import (
     SessionScoringTerms,
     default_score_fn, precision, recall, f1,
     default_feedback_fn,
+    from_row_similarity, SimilarityResult, RowSimilarityFn,
     CompositeComparator, DatatypeComparator,
 )
 ```

@@ -28,6 +28,10 @@ from .context import (
     CowPostgresConfig,
     build_cow_variable_statements,
 )
+from .types import (
+    CHANGE_TABLE_RESERVED_FIELDS,
+    CowWrite,
+)
 
 __all__ = [
     "CowStatus",
@@ -54,4 +58,6 @@ __all__ = [
     "get_cow_status",
     "CowPostgresConfig",
     "build_cow_variable_statements",
+    "CHANGE_TABLE_RESERVED_FIELDS",
+    "CowWrite",
 ]

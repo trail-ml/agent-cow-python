@@ -5,13 +5,13 @@ Top-level orchestration for graph-based COW session scoring.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
 from typing import Optional
 from uuid import UUID
 
 from .comparators import CompositeComparator, DatatypeComparator, FieldConfig, WriteComparator
 from .efficiency import compute_efficiency
 from .entity_state import compute_entity_state_score, flatten_graph
+from .row_similarity import from_row_similarity
 from .extraction import (
     Executor,
     extract_session_graph,
@@ -38,22 +38,11 @@ from .types import (
     ScoredNode,
     ScoreFn,
     ScoringConfig,
+    ScoringResult,
     SessionScoringTerms,
 )
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class ScoringResult:
-    scores: dict[str, float]
-    feedback_report: str
-    terms: SessionScoringTerms
-    scored_graph: ScoredGraph
-    matched_writes: list[MatchedWrite] = field(default_factory=list)
-    missing_writes: list[MissingWrite] = field(default_factory=list)
-    extra_writes: list[ExtraWrite] = field(default_factory=list)
-    entity_state_comparisons: list[EntityComparison] = field(default_factory=list)
 
 
 async def build_field_config(
@@ -101,9 +90,7 @@ async def score_sessions(
     field_config: Optional[FieldConfig] = None,
 ) -> ScoringResult:
     config = config or ScoringConfig()
-    comparator: WriteComparator = config.comparator or CompositeComparator(
-        default=DatatypeComparator(match_threshold=config.match_threshold)
-    )
+    comparator: WriteComparator = _build_comparator(config)
 
     gt_graph, agent_graph = ground_truth, agent
     if config.collapse:
@@ -133,7 +120,12 @@ async def score_sessions(
     efficiency_result = compute_efficiency(gt_graph, agent_graph, matched_agent_pks)
 
     matched_writes, missing_writes, extra_writes = _split_entity_comparisons(
-        entity_result, gt_graph, agent_graph, comparator, field_config
+        entity_result,
+        gt_graph,
+        agent_graph,
+        comparator,
+        field_config,
+        config.exact_match_threshold,
     )
 
     extra_by_op: dict[UUID, int] = {}
@@ -210,6 +202,36 @@ async def score_cow_sessions(
     )
 
 
+def _build_comparator(config: ScoringConfig) -> WriteComparator:
+    """Compose a ``WriteComparator`` from explicit config + per-table row similarity fns."""
+    threshold = config.match_threshold
+    default: WriteComparator = DatatypeComparator(match_threshold=threshold)
+    table_comparators: dict[str, WriteComparator] = {}
+
+    if isinstance(config.comparator, CompositeComparator):
+        table_comparators.update(config.comparator.table_comparators)
+        default = config.comparator.default
+    elif config.comparator is not None:
+        default = config.comparator
+
+    if config.row_similarity:
+        for table_name, fn in config.row_similarity.items():
+            table_comparators[table_name] = from_row_similarity(
+                fn, match_threshold=threshold
+            )
+
+    if not table_comparators and isinstance(config.comparator, CompositeComparator):
+        return config.comparator
+    if not table_comparators and config.comparator is not None:
+        return config.comparator
+
+    return CompositeComparator(
+        table_comparators=table_comparators,
+        default=default,
+        match_threshold=threshold,
+    )
+
+
 def _collapse_graph(graph: CowGraph) -> CowGraph:
     collapsed_rows = collapse_to_final_state(flatten_graph(graph))
     if not collapsed_rows:
@@ -235,6 +257,7 @@ def _split_entity_comparisons(
     agent_graph: CowGraph,
     comparator: WriteComparator,
     field_config: FieldConfig,
+    exact_match_threshold: float,
 ) -> tuple[list[MatchedWrite], list[MissingWrite], list[ExtraWrite]]:
     from .matching import match_writes
 
@@ -243,7 +266,13 @@ def _split_entity_comparisons(
 
     _ = entity_result
 
-    result = match_writes(gt_final, agent_final, comparator, field_config)
+    result = match_writes(
+        gt_final,
+        agent_final,
+        comparator,
+        field_config,
+        exact_match_threshold=exact_match_threshold,
+    )
     return result.matched_writes, result.missing_writes, result.extra_writes
 
 

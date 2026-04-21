@@ -41,9 +41,14 @@ from .matching import (
     topological_sort_writes,
 )
 from .op_utility import compute_op_utilities
+from .row_similarity import (
+    RowSimilarityComparator,
+    RowSimilarityFn,
+    SimilarityResult,
+    from_row_similarity,
+)
 from .sample_scorers import default_score_fn, f1, precision, recall
 from .scorer import (
-    ScoringResult,
     build_empty_field_config,
     build_field_config,
     score_cow_sessions,
@@ -65,6 +70,7 @@ from .types import (
     ScoredNode,
     ScoreFn,
     ScoringConfig,
+    ScoringResult,
     SessionScoringTerms,
     WastefulPair,
 )
@@ -100,6 +106,10 @@ __all__ = [
     "WriteComparator",
     "WriteComparisonResult",
     "categorize_data_type",
+    "SimilarityResult",
+    "RowSimilarityComparator",
+    "RowSimilarityFn",
+    "from_row_similarity",
     "Executor",
     "extract_session_graph",
     "extract_session_writes",

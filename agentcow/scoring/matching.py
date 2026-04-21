@@ -13,6 +13,9 @@ from .comparators import FieldConfig, WriteComparator, WriteComparisonResult
 from .types import CowWrite, ExtraWrite, MatchedWrite, MissingWrite
 
 
+DEFAULT_EXACT_MATCH_THRESHOLD = 0.9999
+
+
 @dataclass
 class MatchResult:
     matched_writes: list[MatchedWrite] = field(default_factory=list)
@@ -56,9 +59,6 @@ def topological_sort_writes(writes: list[CowWrite]) -> list[CowWrite]:
     return sorted(writes, key=lambda write: write.updated_at)
 
 
-EXACT_MATCH_THRESHOLD = 0.9999
-
-
 def find_best_match(
     gt: CowWrite,
     agent_candidates: list[CowWrite],
@@ -68,6 +68,7 @@ def find_best_match(
     gt_created_uuids: set[UUID],
     agent_created_uuids: set[UUID],
     used_agent_keys: set[tuple],
+    exact_match_threshold: float = DEFAULT_EXACT_MATCH_THRESHOLD,
 ) -> tuple[Optional[CowWrite], Optional[WriteComparisonResult]]:
     best_agent: Optional[CowWrite] = None
     best_result: Optional[WriteComparisonResult] = None
@@ -94,7 +95,7 @@ def find_best_match(
             best_similarity = result.similarity
             best_agent = candidate
             best_result = result
-            if result.similarity >= EXACT_MATCH_THRESHOLD:
+            if result.similarity >= exact_match_threshold:
                 break
 
     return best_agent, best_result
@@ -106,6 +107,7 @@ def _run_exact_match_pass(
     comparator: WriteComparator,
     field_config: FieldConfig,
     uuid_mapping: dict[UUID, UUID],
+    exact_match_threshold: float,
 ) -> tuple[dict[tuple, tuple[CowWrite, WriteComparisonResult]], set[tuple]]:
     gt_created = get_created_uuids(gt_writes)
     agent_created = get_created_uuids(agent_writes)
@@ -128,10 +130,11 @@ def _run_exact_match_pass(
             gt_created,
             agent_created,
             used_agent_keys,
+            exact_match_threshold=exact_match_threshold,
         )
         if agent is None or result is None:
             continue
-        if result.similarity < EXACT_MATCH_THRESHOLD:
+        if result.similarity < exact_match_threshold:
             continue
         matches[gt.get_pk_tuple()] = (agent, result)
         used_agent_keys.add(agent.get_pk_tuple())
@@ -176,6 +179,7 @@ def _run_structural_match_pass(
     uuid_mapping: dict[UUID, UUID],
     existing_matches: dict[tuple, tuple[CowWrite, WriteComparisonResult]],
     existing_used_agent_keys: set[tuple],
+    exact_match_threshold: float,
 ) -> tuple[dict[tuple, tuple[CowWrite, WriteComparisonResult]], set[tuple]]:
     gt_created = get_created_uuids(gt_writes)
     agent_created = get_created_uuids(agent_writes)
@@ -210,6 +214,7 @@ def _run_structural_match_pass(
             gt_created,
             agent_created,
             used_agent_keys,
+            exact_match_threshold=exact_match_threshold,
         )
         if agent is None or result is None:
             continue
@@ -227,6 +232,7 @@ def match_writes(
     comparator: WriteComparator,
     field_config: FieldConfig,
     seed_uuid_mapping: Optional[dict[UUID, UUID]] = None,
+    exact_match_threshold: float = DEFAULT_EXACT_MATCH_THRESHOLD,
 ) -> MatchResult:
     uuid_mapping: dict[UUID, UUID] = dict(seed_uuid_mapping or {})
 
@@ -236,6 +242,7 @@ def match_writes(
         comparator,
         field_config,
         uuid_mapping,
+        exact_match_threshold,
     )
     _update_uuid_mapping(uuid_mapping, exact_matches, gt_writes)
 
@@ -247,6 +254,7 @@ def match_writes(
         uuid_mapping,
         exact_matches,
         exact_used_agent_keys,
+        exact_match_threshold,
     )
     _update_uuid_mapping(uuid_mapping, structural_matches, gt_writes)
 
