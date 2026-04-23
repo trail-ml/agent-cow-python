@@ -485,9 +485,7 @@ async def test_commit_schema_with_new_fk_referenced_rows(
     committed = await commit_cow_session_schema(seeded_executor, session_id)
     assert sorted(committed) == ["projects", "users"]
 
-    rows = await seeded_executor.execute(
-        "SELECT name FROM users WHERE id = 100"
-    )
+    rows = await seeded_executor.execute("SELECT name FROM users WHERE id = 100")
     assert rows == [("Petunia",)]
 
     rows = await seeded_executor.execute(
@@ -565,11 +563,38 @@ async def test_commit_single_table_with_fk_to_existing_row(
 
 
 @pytest.mark.asyncio
-async def test_enable_cow_makes_fk_constraints_deferrable(seeded_executor):
-    """After enable_cow, FK constraints on the base table should be marked
-    as DEFERRABLE so that SET CONSTRAINTS ALL DEFERRED can work."""
+async def test_enable_cow_with_allow_deferred_fks_opt_in(seeded_executor):
+    """When the caller opts in, FK constraints on the base table are
+    flipped to DEFERRABLE INITIALLY IMMEDIATE."""
     await deploy_cow_functions(seeded_executor)
-    await enable_cow(seeded_executor, "projects")
+    await enable_cow(seeded_executor, "projects", allow_deferred_fks=True)
+
+    rows = await seeded_executor.execute(
+        "SELECT con.conname, con.condeferrable, con.condeferred "
+        "FROM pg_constraint con "
+        "JOIN pg_class cls ON con.conrelid = cls.oid "
+        "JOIN pg_namespace ns ON cls.relnamespace = ns.oid "
+        "WHERE con.contype = 'f' "
+        "  AND ns.nspname = 'public' "
+        "  AND cls.relname = 'projects_base'"
+    )
+    assert len(rows) > 0
+    for conname, condeferrable, condeferred in rows:
+        assert (
+            condeferrable is True
+        ), f"FK {conname} on projects_base should be deferrable"
+        assert (
+            condeferred is False
+        ), f"FK {conname} on projects_base should be INITIALLY IMMEDIATE"
+
+
+@pytest.mark.asyncio
+async def test_disable_cow_reverts_opted_in_fk_constraints(seeded_executor):
+    """After an opt-in enable_cow(allow_deferred_fks=True), disable_cow
+    should flip the constraints back to NOT DEFERRABLE."""
+    await deploy_cow_functions(seeded_executor)
+    await enable_cow(seeded_executor, "projects", allow_deferred_fks=True)
+    await disable_cow(seeded_executor, "projects")
 
     rows = await seeded_executor.execute(
         "SELECT con.conname, con.condeferrable "
@@ -578,20 +603,43 @@ async def test_enable_cow_makes_fk_constraints_deferrable(seeded_executor):
         "JOIN pg_namespace ns ON cls.relnamespace = ns.oid "
         "WHERE con.contype = 'f' "
         "  AND ns.nspname = 'public' "
-        "  AND cls.relname = 'projects_base'"
+        "  AND cls.relname = 'projects'"
     )
-    assert len(rows) > 0, "projects_base should have at least one FK constraint"
+    assert len(rows) > 0
     for conname, condeferrable in rows:
-        assert condeferrable is True, (
-            f"FK constraint {conname} on projects_base should be deferrable"
-        )
+        assert (
+            condeferrable is False
+        ), f"FK constraint {conname} on projects should have been reverted"
 
 
 @pytest.mark.asyncio
-async def test_enable_cow_makes_multi_hop_fk_deferrable(seeded_executor):
-    """tasks -> projects -> users: both levels of FK should become deferrable."""
+async def test_disable_cow_schema_reverts_opted_in_fk_constraints(seeded_executor):
+    """disable_cow_schema reverts FK constraints on every opted-in table."""
     await deploy_cow_functions(seeded_executor)
-    await enable_cow_schema(seeded_executor)
+    await enable_cow_schema(seeded_executor, allow_deferred_fks=True)
+    await disable_cow_schema(seeded_executor)
+
+    for table in ("tasks", "projects"):
+        rows = await seeded_executor.execute(
+            "SELECT con.conname, con.condeferrable "
+            "FROM pg_constraint con "
+            "JOIN pg_class cls ON con.conrelid = cls.oid "
+            "JOIN pg_namespace ns ON cls.relnamespace = ns.oid "
+            "WHERE con.contype = 'f' "
+            f"  AND ns.nspname = 'public' AND cls.relname = '{table}'"
+        )
+        for conname, condeferrable in rows:
+            assert (
+                condeferrable is False
+            ), f"FK constraint {conname} on {table} should have been reverted"
+
+
+@pytest.mark.asyncio
+async def test_enable_cow_schema_opt_in_flips_multi_hop_fks(seeded_executor):
+    """tasks -> projects -> users: every FK across the chain is flipped
+    when allow_deferred_fks=True is used schema-wide."""
+    await deploy_cow_functions(seeded_executor)
+    await enable_cow_schema(seeded_executor, allow_deferred_fks=True)
 
     for base_table in ("tasks_base", "projects_base"):
         rows = await seeded_executor.execute(
@@ -603,17 +651,18 @@ async def test_enable_cow_makes_multi_hop_fk_deferrable(seeded_executor):
             f"  AND ns.nspname = 'public' AND cls.relname = '{base_table}'"
         )
         for conname, condeferrable in rows:
-            assert condeferrable is True, (
-                f"FK constraint {conname} on {base_table} should be deferrable"
-            )
+            assert (
+                condeferrable is True
+            ), f"FK {conname} on {base_table} should be deferrable"
 
 
 @pytest.mark.asyncio
 async def test_deferred_fk_constraints_context_manager(seeded_executor):
     """The deferred_fk_constraints context manager should defer and then
-    re-enable FK constraint checks."""
+    re-enable FK constraint checks. Requires FKs to be DEFERRABLE, so the
+    caller opts in with allow_deferred_fks=True."""
     await deploy_cow_functions(seeded_executor)
-    await enable_cow_schema(seeded_executor)
+    await enable_cow_schema(seeded_executor, allow_deferred_fks=True)
 
     async with deferred_fk_constraints(seeded_executor):
         await seeded_executor.execute(
@@ -629,9 +678,7 @@ async def test_deferred_fk_constraints_context_manager(seeded_executor):
         "SELECT title FROM projects_base WHERE id = 999"
     )
     assert rows == [("Phantom Project",)]
-    rows = await seeded_executor.execute(
-        "SELECT name FROM users_base WHERE id = 999"
-    )
+    rows = await seeded_executor.execute("SELECT name FROM users_base WHERE id = 999")
     assert rows == [("Ghost",)]
 
 
@@ -640,7 +687,8 @@ async def test_commit_schema_delete_and_reinsert_with_fk(
     seeded_executor, session_id, operation_id
 ):
     """Deleting a user and reinserting with the same ID, while a project
-    still references that user, should commit cleanly with deferral."""
+    still references that user, should commit cleanly via topological
+    ordering (upsert-before-delete within users_base)."""
     await deploy_cow_functions(seeded_executor)
     await enable_cow_schema(seeded_executor)
 
@@ -657,3 +705,108 @@ async def test_commit_schema_delete_and_reinsert_with_fk(
 
     rows = await seeded_executor.execute("SELECT name FROM users WHERE id = 1")
     assert rows == [("Bessie Jr",)]
+
+
+@pytest.mark.asyncio
+async def test_commit_schema_topological_ordering(
+    seeded_executor, session_id, operation_id
+):
+    """With the default non-intrusive path (no DEFERRABLE flip), a
+    schema-wide commit touching users -> projects -> tasks should
+    succeed via topological ordering alone."""
+    await deploy_cow_functions(seeded_executor)
+    await enable_cow_schema(seeded_executor)
+
+    for base_table in ("users_base", "projects_base", "tasks_base"):
+        rows = await seeded_executor.execute(
+            "SELECT condeferrable FROM pg_constraint con "
+            "JOIN pg_class cls ON con.conrelid = cls.oid "
+            "JOIN pg_namespace ns ON cls.relnamespace = ns.oid "
+            "WHERE con.contype = 'f' AND ns.nspname = 'public' "
+            f"AND cls.relname = '{base_table}'"
+        )
+        for (condeferrable,) in rows:
+            assert (
+                condeferrable is False
+            ), f"Default enable_cow_schema should NOT flip {base_table} FKs"
+
+    await apply_cow_variables(seeded_executor, session_id, operation_id)
+    await seeded_executor.execute(
+        "INSERT INTO users (id, name, email) "
+        "VALUES (500, 'Marigold', 'marigold@blossom.farm')"
+    )
+    await seeded_executor.execute(
+        "INSERT INTO projects (id, owner_id, title, description) "
+        "VALUES (500, 500, 'Blossom Orchard', 'Marigold hedges')"
+    )
+    await seeded_executor.execute(
+        "INSERT INTO tasks (project_id, assigned_to, title) "
+        "VALUES (500, 500, 'Plant marigolds')"
+    )
+    await reset_cow_variables(seeded_executor)
+
+    committed = await commit_cow_session_schema(seeded_executor, session_id)
+    assert committed == [
+        "users",
+        "projects",
+        "tasks",
+    ], "Parents should be committed before children"
+
+    rows = await seeded_executor.execute(
+        "SELECT title FROM tasks WHERE project_id = 500"
+    )
+    assert rows == [("Plant marigolds",)]
+
+
+@pytest.mark.asyncio
+async def test_commit_schema_delete_children_before_parents(
+    seeded_executor, session_id, operation_id
+):
+    """Deleting a project (child) and its owner (parent) in the same COW
+    session should commit cleanly — children are deleted before parents."""
+    await deploy_cow_functions(seeded_executor)
+    await enable_cow_schema(seeded_executor)
+
+    await apply_cow_variables(seeded_executor, session_id, operation_id)
+    await seeded_executor.execute("DELETE FROM tasks WHERE project_id = 1")
+    await seeded_executor.execute("DELETE FROM projects WHERE id = 1")
+    await seeded_executor.execute("DELETE FROM tasks WHERE assigned_to = 1")
+    await seeded_executor.execute("DELETE FROM users WHERE id = 1")
+    await reset_cow_variables(seeded_executor)
+
+    committed = await commit_cow_session_schema(seeded_executor, session_id)
+    assert sorted(committed) == ["projects", "tasks", "users"]
+
+    rows = await seeded_executor.execute("SELECT name FROM users WHERE id = 1")
+    assert rows == []
+    rows = await seeded_executor.execute("SELECT id FROM projects WHERE id = 1")
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_commit_schema_with_defer_fk_constraints_opt_in(
+    seeded_executor, session_id, operation_id
+):
+    """defer_fk_constraints=True reuses the deferred-check path, which
+    requires the caller to have enabled COW with allow_deferred_fks=True."""
+    await deploy_cow_functions(seeded_executor)
+    await enable_cow_schema(seeded_executor, allow_deferred_fks=True)
+
+    await apply_cow_variables(seeded_executor, session_id, operation_id)
+    await seeded_executor.execute(
+        "INSERT INTO users (id, name, email) "
+        "VALUES (600, 'Juniper', 'juniper@evergreen.farm')"
+    )
+    await seeded_executor.execute(
+        "INSERT INTO projects (id, owner_id, title, description) "
+        "VALUES (600, 600, 'Evergreen', 'Pine saplings')"
+    )
+    await reset_cow_variables(seeded_executor)
+
+    committed = await commit_cow_session_schema(
+        seeded_executor, session_id, defer_fk_constraints=True
+    )
+    assert sorted(committed) == ["projects", "users"]
+
+    rows = await seeded_executor.execute("SELECT name FROM users WHERE id = 600")
+    assert rows == [("Juniper",)]

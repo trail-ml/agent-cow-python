@@ -67,7 +67,6 @@ DECLARE
     base_table_owner     text;
     base_on_conflict     text;
     changes_on_conflict  text;
-    r                    RECORD;
 BEGIN
     pk_cols_quoted := (SELECT string_agg(quote_ident(col), ', ') FROM unnest(p_pk_cols) col);
     pk_join_condition := (SELECT string_agg(format('c2.%I = b.%I', col, col), ' AND ') FROM unnest(p_pk_cols) col);
@@ -104,24 +103,6 @@ BEGIN
         changes_table_name || '_session_pk_idx',
         qual_changes, pk_cols_quoted
     );
-
-    -- 1b. Make FK constraints on the base table deferrable so that
-    --     multi-table COW commits can defer cross-table checks.
-    FOR r IN
-        SELECT con.conname
-        FROM pg_constraint con
-        JOIN pg_class cls ON con.conrelid = cls.oid
-        JOIN pg_namespace ns ON cls.relnamespace = ns.oid
-        WHERE con.contype = 'f'
-          AND ns.nspname = p_schema
-          AND cls.relname = p_base_table
-          AND NOT con.condeferrable
-    LOOP
-        EXECUTE format(
-            'ALTER TABLE %s ALTER CONSTRAINT %I DEFERRABLE INITIALLY IMMEDIATE',
-            qual_base, r.conname
-        );
-    END LOOP;
 
     -- 2. Build column lists from the base table
     SELECT
@@ -325,8 +306,8 @@ END;
 $$;
 """
 
-COMMIT_COW_SQL = """
-CREATE OR REPLACE FUNCTION commit_cow(
+COMMIT_COW_UPSERT_SQL = """
+CREATE OR REPLACE FUNCTION commit_cow_upsert(
     p_schema          text,
     p_base_table      text,
     p_pk_cols         text[],
@@ -339,15 +320,11 @@ AS $$
 DECLARE
     qual_base          text := format('%I.%I', p_schema, p_base_table);
     qual_changes       text := format('%I.%I', p_schema, _cow_changes_table_name(p_base_table));
-    p_view_name        text := regexp_replace(p_base_table, '_base$', '');
     pk_cols_quoted     text;
-    pk_join_condition  text;
     update_set_clause  text;
     col_list           text;
-    has_remaining      boolean;
 BEGIN
     pk_cols_quoted := (SELECT string_agg(quote_ident(col), ', ') FROM unnest(p_pk_cols) col);
-    pk_join_condition := (SELECT string_agg(format('c.%I = b.%I', col, col), ' AND ') FROM unnest(p_pk_cols) col);
 
     SELECT string_agg(quote_ident(column_name), ', ' ORDER BY ordinal_position)
     INTO col_list
@@ -393,6 +370,29 @@ BEGIN
         $sql$, qual_base, col_list, pk_cols_quoted, qual_changes, pk_cols_quoted, pk_cols_quoted, update_set_clause)
         USING p_session, p_operation_ids;
     END IF;
+END;
+$$;
+"""
+
+COMMIT_COW_DELETE_SQL = """
+CREATE OR REPLACE FUNCTION commit_cow_delete(
+    p_schema          text,
+    p_base_table      text,
+    p_pk_cols         text[],
+    p_session         uuid,
+    p_operation_ids   uuid[] DEFAULT NULL
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    qual_base          text := format('%I.%I', p_schema, p_base_table);
+    qual_changes       text := format('%I.%I', p_schema, _cow_changes_table_name(p_base_table));
+    pk_cols_quoted     text;
+    pk_join_condition  text;
+BEGIN
+    pk_cols_quoted := (SELECT string_agg(quote_ident(col), ', ') FROM unnest(p_pk_cols) col);
+    pk_join_condition := (SELECT string_agg(format('c.%I = b.%I', col, col), ' AND ') FROM unnest(p_pk_cols) col);
 
     EXECUTE format($sql$
         DELETE FROM %s b
@@ -406,14 +406,31 @@ BEGIN
         WHERE c._cow_deleted = TRUE AND %s
     $sql$, qual_base, pk_cols_quoted, qual_changes, pk_cols_quoted, pk_join_condition)
     USING p_session, p_operation_ids;
+END;
+$$;
+"""
 
+COMMIT_COW_CLEANUP_SQL = """
+CREATE OR REPLACE FUNCTION commit_cow_cleanup(
+    p_schema          text,
+    p_base_table      text,
+    p_session         uuid,
+    p_operation_ids   uuid[] DEFAULT NULL
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    qual_changes   text := format('%I.%I', p_schema, _cow_changes_table_name(p_base_table));
+    p_view_name    text := regexp_replace(p_base_table, '_base$', '');
+    has_remaining  boolean;
+BEGIN
     EXECUTE format(
         'DELETE FROM %s WHERE session_id = $1 AND ($2::uuid[] IS NULL OR operation_id = ANY($2))',
         qual_changes
     )
     USING p_session, p_operation_ids;
 
-    -- Clean up dirty table entry if no changes remain for this session+table
     EXECUTE format(
         'SELECT EXISTS(SELECT 1 FROM %s WHERE session_id = $1 LIMIT 1)',
         qual_changes
@@ -425,6 +442,25 @@ BEGIN
           AND session_id = p_session
           AND table_name = p_view_name;
     END IF;
+END;
+$$;
+"""
+
+COMMIT_COW_SQL = """
+CREATE OR REPLACE FUNCTION commit_cow(
+    p_schema          text,
+    p_base_table      text,
+    p_pk_cols         text[],
+    p_session         uuid,
+    p_operation_ids   uuid[] DEFAULT NULL
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    PERFORM commit_cow_upsert(p_schema, p_base_table, p_pk_cols, p_session, p_operation_ids);
+    PERFORM commit_cow_delete(p_schema, p_base_table, p_pk_cols, p_session, p_operation_ids);
+    PERFORM commit_cow_cleanup(p_schema, p_base_table, p_session, p_operation_ids);
 END;
 $$;
 """
@@ -677,5 +713,31 @@ BEGIN
         ORDER BY earliest_change
     $q$, query) USING p_session_id;
 END;
+$$;
+"""
+
+GET_COW_FK_EDGES_SQL = """
+CREATE OR REPLACE FUNCTION _cow_fk_edges(
+    p_schema      text,
+    p_base_tables text[]
+)
+RETURNS TABLE(parent_base_table text, child_base_table text, is_self_ref boolean)
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT DISTINCT
+        parent_cls.relname::text AS parent_base_table,
+        child_cls.relname::text  AS child_base_table,
+        (parent_cls.oid = child_cls.oid) AS is_self_ref
+    FROM pg_constraint con
+    JOIN pg_class child_cls ON con.conrelid = child_cls.oid
+    JOIN pg_namespace child_ns ON child_cls.relnamespace = child_ns.oid
+    JOIN pg_class parent_cls ON con.confrelid = parent_cls.oid
+    JOIN pg_namespace parent_ns ON parent_cls.relnamespace = parent_ns.oid
+    WHERE con.contype = 'f'
+      AND child_ns.nspname = p_schema
+      AND parent_ns.nspname = p_schema
+      AND child_cls.relname = ANY(p_base_tables)
+      AND parent_cls.relname = ANY(p_base_tables);
 $$;
 """
