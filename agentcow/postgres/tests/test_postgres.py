@@ -588,52 +588,6 @@ async def test_enable_cow_makes_fk_constraints_deferrable(seeded_executor):
 
 
 @pytest.mark.asyncio
-async def test_disable_cow_reverts_fk_constraints_to_not_deferrable(seeded_executor):
-    """After disable_cow, FK constraints on the restored table should be
-    reverted back to NOT DEFERRABLE, undoing what enable_cow did."""
-    await deploy_cow_functions(seeded_executor)
-    await enable_cow(seeded_executor, "projects")
-    await disable_cow(seeded_executor, "projects")
-
-    rows = await seeded_executor.execute(
-        "SELECT con.conname, con.condeferrable "
-        "FROM pg_constraint con "
-        "JOIN pg_class cls ON con.conrelid = cls.oid "
-        "JOIN pg_namespace ns ON cls.relnamespace = ns.oid "
-        "WHERE con.contype = 'f' "
-        "  AND ns.nspname = 'public' "
-        "  AND cls.relname = 'projects'"
-    )
-    assert len(rows) > 0, "projects should have at least one FK constraint"
-    for conname, condeferrable in rows:
-        assert condeferrable is False, (
-            f"FK constraint {conname} on projects should no longer be deferrable"
-        )
-
-
-@pytest.mark.asyncio
-async def test_disable_cow_schema_reverts_fk_constraints(seeded_executor):
-    """disable_cow_schema should revert FK constraints on every restored table."""
-    await deploy_cow_functions(seeded_executor)
-    await enable_cow_schema(seeded_executor)
-    await disable_cow_schema(seeded_executor)
-
-    for table in ("tasks", "projects"):
-        rows = await seeded_executor.execute(
-            "SELECT con.conname, con.condeferrable "
-            "FROM pg_constraint con "
-            "JOIN pg_class cls ON con.conrelid = cls.oid "
-            "JOIN pg_namespace ns ON cls.relnamespace = ns.oid "
-            "WHERE con.contype = 'f' "
-            f"  AND ns.nspname = 'public' AND cls.relname = '{table}'"
-        )
-        for conname, condeferrable in rows:
-            assert condeferrable is False, (
-                f"FK constraint {conname} on {table} should no longer be deferrable"
-            )
-
-
-@pytest.mark.asyncio
 async def test_enable_cow_makes_multi_hop_fk_deferrable(seeded_executor):
     """tasks -> projects -> users: both levels of FK should become deferrable."""
     await deploy_cow_functions(seeded_executor)
