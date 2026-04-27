@@ -26,10 +26,10 @@ Requirements:
 from __future__ import annotations
 
 import asyncio
-import collections
 import traceback
 import uuid
 from contextlib import asynccontextmanager
+from graphlib import TopologicalSorter
 from typing import Any, AsyncIterator
 
 from sqlalchemy import Column, ForeignKey, Integer, String, event, inspect, select, text
@@ -199,34 +199,19 @@ def _toposort_models(
         if tbl:
             model_map[tbl] = m
 
-    deps: dict[type, set[type]] = collections.defaultdict(set)
+    sorter: TopologicalSorter[type[DeclarativeBase]] = TopologicalSorter()
     for model in models:
+        sorter.add(model)
         for col in inspect(model).columns:
             for fk in col.foreign_keys:
                 parts = fk.target_fullname.split(".")
-                if len(parts) >= 2:
-                    target = parts[-2]
-                    if target in model_map and model_map[target] is not model:
-                        deps[model].add(model_map[target])
+                if len(parts) < 2:
+                    continue
+                parent = model_map.get(parts[-2])
+                if parent is not None and parent is not model:
+                    sorter.add(model, parent)
 
-    result: list[type[DeclarativeBase]] = []
-    visited: set[type] = set()
-    visiting: set[type] = set()
-
-    def visit(node: type):
-        if node in visiting:
-            return
-        if node not in visited:
-            visiting.add(node)
-            for dep in deps[node]:
-                visit(dep)
-            visiting.discard(node)
-            visited.add(node)
-            result.append(node)
-
-    for m in models:
-        visit(m)
-    return result
+    return list(sorter.static_order())
 
 
 async def enable_cow_for_models(

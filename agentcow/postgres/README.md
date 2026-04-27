@@ -186,8 +186,8 @@ for stmt in stmts:
 | Function | Description |
 |----------|-------------|
 | `deploy_cow_functions(executor)` | Deploy COW PL/pgSQL functions to the database |
-| `enable_cow(executor, table_name, *, pk_cols=None, schema="public")` | Enable COW on a single table. Primary keys are auto-detected if not provided |
-| `enable_cow_schema(executor, *, schema="public", exclude=None)` | Enable COW on all user tables in a schema. Returns list of enabled table names |
+| `enable_cow(executor, table_name, *, pk_cols=None, schema="public", allow_deferred_fks=False)` | Enable COW on a single table. Primary keys are auto-detected if not provided. See [FK constraints](#fk-constraints-and-multi-table-commits) for `allow_deferred_fks` |
+| `enable_cow_schema(executor, *, schema="public", exclude=None, allow_deferred_fks=False)` | Enable COW on all user tables in a schema. Returns list of enabled table names |
 
 ### Per-Request
 
@@ -212,6 +212,7 @@ for stmt in stmts:
 | Function | Description |
 |----------|-------------|
 | `commit_cow_session(executor, table_name, session_id, *, pk_cols=None, schema="public")` | Commit all session changes to the base table |
+| `commit_cow_session_schema(executor, session_id, *, schema="public", defer_fk_constraints=False)` | Commit every dirty table for the session. Orders by FK dependency by default — see [FK constraints](#fk-constraints-and-multi-table-commits) |
 | `discard_cow_session(executor, table_name, session_id, *, schema="public")` | Discard all session changes |
 | `commit_cow_operations(executor, table_name, session_id, operation_ids, *, pk_cols=None, schema="public")` | Commit specific operations (cherry-pick) |
 | `discard_cow_operations(executor, table_name, session_id, operation_ids, *, schema="public")` | Discard specific operations |
@@ -220,8 +221,33 @@ for stmt in stmts:
 
 | Function | Description |
 |----------|-------------|
-| `disable_cow(executor, table_name, *, schema="public")` | Disable COW on a table, restoring the original base table |
-| `disable_cow_schema(executor, *, schema="public", exclude=None)` | Disable COW on all COW-enabled tables in a schema |
+| `disable_cow(executor, table_name, *, schema="public", revert_deferred_fks=True)` | Disable COW on a table, restoring the original base table. Reverts any `DEFERRABLE INITIALLY IMMEDIATE` FKs back to `NOT DEFERRABLE` |
+| `disable_cow_schema(executor, *, schema="public", exclude=None, revert_deferred_fks=True)` | Disable COW on all COW-enabled tables in a schema |
+
+## FK Constraints and Multi-Table Commits
+
+When you commit a session that spans multiple tables with foreign keys between them, the commit order matters:
+
+- Parents must be inserted before children (new user → new project referencing that user)
+- Children must be deleted before parents (delete project → delete its owner)
+
+By default, `commit_cow_session_schema` discovers the FK graph between your dirty tables, topologically sorts them, and commits in two phases: upserts run parents-first and deletes run children-first. This keeps the database consistent at every step without any schema modifications — your FK constraints stay exactly as you defined them.
+
+If the dirty-table subgraph contains an FK **cycle**, the library raises `ValueError` at commit time. Cycles genuinely can't be ordered row-by-row; you need constraint deferral to commit them.
+
+For cycles, self-referential FKs, or bulk loads where you'd rather rely on Postgres to defer FK checks until end-of-transaction, opt in with:
+
+```python
+# One-time: flip the relevant FKs to DEFERRABLE INITIALLY IMMEDIATE
+await enable_cow_schema(executor, allow_deferred_fks=True)
+
+# Per-commit: use SET CONSTRAINTS ALL DEFERRED around the loop
+await commit_cow_session_schema(executor, session_id, defer_fk_constraints=True)
+```
+
+`enable_cow(..., allow_deferred_fks=True)` only flips constraints that are currently `NOT DEFERRABLE`. Constraints that are `INITIALLY DEFERRED` (a deliberate schema choice) are left alone. `disable_cow` reverses the flip.
+
+Without the opt-in, **no schema changes** are made by agent-cow.
 
 ### Types
 

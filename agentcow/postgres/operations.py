@@ -11,7 +11,15 @@ No driver-specific imports are used — only standard Python + raw SQL.
 import uuid
 
 
-COW_FUNCTION_NAMES = ("setup_cow", "commit_cow", "discard_cow", "teardown_cow")
+COW_FUNCTION_NAMES = (
+    "setup_cow",
+    "commit_cow",
+    "commit_cow_upsert",
+    "commit_cow_delete",
+    "commit_cow_cleanup",
+    "discard_cow",
+    "teardown_cow",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +256,162 @@ def commit_cow_session_sql(
         f"{_to_text_array(pk_cols)}, "
         f"{_to_uuid(session_id)})"
     )
+
+
+def commit_cow_upsert_sql(
+    schema: str,
+    base_table: str,
+    pk_cols: list[str],
+    session_id: str | uuid.UUID,
+    operation_ids: list[str | uuid.UUID] | None = None,
+) -> str:
+    """SQL to apply the upsert phase of a COW commit for one table.
+
+    Commits non-deleted rows only, leaving deletes and cleanup to
+    subsequent calls. Used by schema-level commits to phase inserts
+    and deletes across tables in FK dependency order.
+    """
+    ops = (
+        f"{_to_uuid_array(operation_ids)}"
+        if operation_ids
+        else "NULL::uuid[]"
+    )
+    return (
+        f"SELECT commit_cow_upsert("
+        f"{_quote_literal(schema)}, "
+        f"{_quote_literal(base_table)}, "
+        f"{_to_text_array(pk_cols)}, "
+        f"{_to_uuid(session_id)}, "
+        f"{ops})"
+    )
+
+
+def commit_cow_delete_sql(
+    schema: str,
+    base_table: str,
+    pk_cols: list[str],
+    session_id: str | uuid.UUID,
+    operation_ids: list[str | uuid.UUID] | None = None,
+) -> str:
+    """SQL to apply the delete phase of a COW commit for one table."""
+    ops = (
+        f"{_to_uuid_array(operation_ids)}"
+        if operation_ids
+        else "NULL::uuid[]"
+    )
+    return (
+        f"SELECT commit_cow_delete("
+        f"{_quote_literal(schema)}, "
+        f"{_quote_literal(base_table)}, "
+        f"{_to_text_array(pk_cols)}, "
+        f"{_to_uuid(session_id)}, "
+        f"{ops})"
+    )
+
+
+def commit_cow_cleanup_sql(
+    schema: str,
+    base_table: str,
+    session_id: str | uuid.UUID,
+    operation_ids: list[str | uuid.UUID] | None = None,
+) -> str:
+    """SQL to clean up the changes table and dirty-tables entry after a commit."""
+    ops = (
+        f"{_to_uuid_array(operation_ids)}"
+        if operation_ids
+        else "NULL::uuid[]"
+    )
+    return (
+        f"SELECT commit_cow_cleanup("
+        f"{_quote_literal(schema)}, "
+        f"{_quote_literal(base_table)}, "
+        f"{_to_uuid(session_id)}, "
+        f"{ops})"
+    )
+
+
+def get_cow_fk_edges_sql(schema: str, base_tables: list[str]) -> str:
+    """SQL to fetch FK edges among a set of base tables.
+
+    Returns rows of ``(parent_base_table, child_base_table, is_self_ref)``.
+    """
+    return (
+        f"SELECT parent_base_table, child_base_table, is_self_ref "
+        f"FROM _cow_fk_edges("
+        f"{_quote_literal(schema)}, {_to_text_array(base_tables)})"
+    )
+
+
+def alter_fk_constraints_deferrable_sql(
+    schema: str,
+    base_table: str,
+) -> str:
+    """SQL to flip all non-deferrable FK constraints on *base_table* to
+    ``DEFERRABLE INITIALLY IMMEDIATE``.
+
+    Runs a DO block that discovers the constraints and alters each one.
+    Idempotent: already-deferrable constraints are left alone.
+    """
+    return f"""
+DO $$
+DECLARE
+    r RECORD;
+BEGIN
+    FOR r IN
+        SELECT con.conname
+        FROM pg_constraint con
+        JOIN pg_class cls ON con.conrelid = cls.oid
+        JOIN pg_namespace ns ON cls.relnamespace = ns.oid
+        WHERE con.contype = 'f'
+          AND ns.nspname = {_quote_literal(schema)}
+          AND cls.relname = {_quote_literal(base_table)}
+          AND NOT con.condeferrable
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE {_quote_ident(schema)}.{_quote_ident(base_table)} ALTER CONSTRAINT %I DEFERRABLE INITIALLY IMMEDIATE',
+            r.conname
+        );
+    END LOOP;
+END
+$$;
+""".strip()
+
+
+def alter_fk_constraints_not_deferrable_sql(
+    schema: str,
+    base_table: str,
+) -> str:
+    """SQL to revert ``DEFERRABLE INITIALLY IMMEDIATE`` FKs on *base_table*
+    back to ``NOT DEFERRABLE``.
+
+    Only touches constraints currently marked ``DEFERRABLE INITIALLY IMMEDIATE``;
+    constraints that are ``INITIALLY DEFERRED`` (explicitly chosen by the
+    schema owner) are left alone.
+    """
+    return f"""
+DO $$
+DECLARE
+    r RECORD;
+BEGIN
+    FOR r IN
+        SELECT con.conname
+        FROM pg_constraint con
+        JOIN pg_class cls ON con.conrelid = cls.oid
+        JOIN pg_namespace ns ON cls.relnamespace = ns.oid
+        WHERE con.contype = 'f'
+          AND ns.nspname = {_quote_literal(schema)}
+          AND cls.relname = {_quote_literal(base_table)}
+          AND con.condeferrable
+          AND NOT con.condeferred
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE {_quote_ident(schema)}.{_quote_ident(base_table)} ALTER CONSTRAINT %I NOT DEFERRABLE',
+            r.conname
+        );
+    END LOOP;
+END
+$$;
+""".strip()
 
 
 def discard_cow_session_sql(
