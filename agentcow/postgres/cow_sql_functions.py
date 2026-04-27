@@ -511,10 +511,34 @@ RETURNS void
 LANGUAGE plpgsql
 AS $$
 DECLARE
+    base_table_name    text := p_view_name || '_base';
+    qual_base          text := format('%I.%I', p_schema, base_table_name);
     changes_table_name text := p_view_name || '_changes';
     upsert_fn_name     text := p_view_name || '_cow_upsert';
     delete_fn_name     text := p_view_name || '_cow_delete';
+    r                  RECORD;
 BEGIN
+    -- Revert FK constraints on the base table to NOT DEFERRABLE, undoing
+    -- what setup_cow did. Only touch constraints we know we flipped
+    -- (DEFERRABLE INITIALLY IMMEDIATE); leave any that were already
+    -- DEFERRABLE INITIALLY DEFERRED alone.
+    FOR r IN
+        SELECT con.conname
+        FROM pg_constraint con
+        JOIN pg_class cls ON con.conrelid = cls.oid
+        JOIN pg_namespace ns ON cls.relnamespace = ns.oid
+        WHERE con.contype = 'f'
+          AND ns.nspname = p_schema
+          AND cls.relname = base_table_name
+          AND con.condeferrable
+          AND NOT con.condeferred
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE %s ALTER CONSTRAINT %I NOT DEFERRABLE',
+            qual_base, r.conname
+        );
+    END LOOP;
+
     EXECUTE format('DROP VIEW IF EXISTS %I.%I CASCADE', p_schema, p_view_name);
     EXECUTE format('DROP TABLE IF EXISTS %I.%I CASCADE', p_schema, changes_table_name);
     EXECUTE format('DROP FUNCTION IF EXISTS %I.%I()', p_schema, upsert_fn_name);
