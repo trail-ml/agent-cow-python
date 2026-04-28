@@ -2,203 +2,101 @@
 
 **Score an agent's COW session against a ground truth recording.**
 
-Answers two questions at two levels:
+The module mirrors the structure of [`psudeocode.md`](./psudeocode.md):
 
-- **Session level** — *did the agent produce the right world state?* (structural + content scores) and *did the agent do it efficiently?* (op count and waste).
-- **Operation level** — for each individual agent op, *did this step move the world closer to GT?* (`structural_utility`) and *were the values this step wrote correct?* (`content_utility`).
+- `extraction.py` — pull op IDs, rows, and table metadata from Postgres.
+- `matching.py` — group rows by PK, pair GT with agent, derive UUID mapping, detect wasted ops.
+- `compare.py` — `WriteComparator` Protocol and the default `DatatypeComparator` (which accepts per-table overrides).
+- `scores.py` — `struct_score`, `content_score`, `efficiency`.
+- `scorer.py` — the per-op iteration flow plus the public entry points.
 
-## Install
-
-Scoring ships with `agent-cow`:
-
-```bash
-pip install agent-cow
-```
-
-## Quick Example
-
-Compare an agent session to a ground truth session using the default score function:
+## Quick example
 
 ```python
-import uuid
 from agentcow.scoring import score_cow_sessions
 
 result = await score_cow_sessions(
     executor=executor,
-    ground_truth_session_id=uuid.UUID("..."),
-    agent_session_id=uuid.UUID("..."),
-    schema="public",
-)
-
-result.scores["overall"]   # float in [0, 1]
-result.feedback_report     # LLM-ready narrative
-```
-
-That's it. `score_cow_sessions` pulls both sessions from the COW `*_changes` tables, compares them row-by-row, and returns one number plus a human/LLM readable report.
-
-### The default score
-
-When you don't pass a `ScoringConfig`, `result.scores["overall"]` is computed by `default_score_fn`:
-
-```
-overall = structural_score    * 0.5    # did the agent write to the right rows?
-        + content_score       * 0.2    # were the field values correct?
-        + avg_content_utility * 0.1    # was each step filling in correct values?
-        + efficiency          * 0.2    # reasonable number of ops, no wasted work?
-```
-
-Weights sum to 1, and each term is in `[0, 1]`, so a perfect session hits exactly `1.0`. Each term is a raw signal exposed on `result.terms` — see below.
-
-## Using Your Own Score
-
-The default is a starting point. To weigh things differently, register your own `ScoreFn`:
-
-```python
-from agentcow.scoring import ScoringConfig, SessionScoringTerms, score_cow_sessions
-
-def outcome_only(terms: SessionScoringTerms) -> float:
-    return terms.structural_score * terms.content_score
-
-result = await score_cow_sessions(
-    executor=executor,
     ground_truth_session_id=gt_id,
     agent_session_id=agent_id,
     schema="public",
-    config=ScoringConfig(score_fns={
-        "overall": outcome_only,
-    }),
 )
+
+result.struct_score      # entity coverage in [0, 1]
+result.content_score     # mean field-similarity across matched entities
+result.efficiency        # min(1, gt_ops/a_ops) * (1 - wasted/a_ops)
+result.op_struct_scores  # {op_id: delta_in_struct_score}
+result.op_content_scores # {op_id: delta_in_content_score}
+result.counts            # {"matched", "missing", "extra", "gt_ops", "agent_ops"}
 ```
 
-`sample_scorers.py` ships ready-made `ScoreFn`s you can register by name: `default_score_fn`, `precision`, `recall`, `f1`.
+## Custom score functions
 
-## Custom per-table similarity
-
-`ScoreFn`s only reweight *already-aggregated* signals (eg. extra_row_count, matched_row_count) — by the time one runs, every row has already been matched and compared. Writing a full `WriteComparator` reaches earlier in the pipeline but forces you to reimplement FK remapping, field-level dispatch, and structured result objects just to change one rule.
-
-You can use a `row_similarity` function to override **how similar two rows are** for a given table:
-
-```python
-from agentcow.scoring import ScoringConfig, score_cow_sessions
-
-def issues_similar(gt: dict, agent: dict) -> bool:
-    return (
-        gt["name"].strip().lower() == agent["name"].strip().lower()
-        and gt["state_id"] == agent["state_id"]
-    )
-
-result = await score_cow_sessions(
-    executor=executor,
-    ground_truth_session_id=gt_id,
-    agent_session_id=agent_id,
-    schema="public",
-    config=ScoringConfig(
-        row_similarity={"issues": issues_similar},
-    ),
-)
-```
-
-The callable takes two plain dicts and returns `bool` (exact match / no match → 1.0 / 0.0), `float` (graded similarity in `[0, 1]`), or `SimilarityResult` (for custom feedback / per-field breakdown). Foreign-key UUIDs on the agent side are automatically remapped into GT space before your function runs, so direct `==` on FK columns works without thinking about UUID mapping.
-
-Assertion-style helpers drop in unchanged — an `AssertionError` raised inside the function is caught and becomes mismatch feedback:
-
-```python
-def issues_similar(gt, agent):
-    assert gt["name"] == agent["name"], f"name differs: {gt['name']!r} vs {agent['name']!r}"
-    assert gt["state_id"] == agent["state_id"], "wrong state"
-    return True
-```
-
-Graded similarity when a boolean is too blunt:
-
-```python
-from difflib import SequenceMatcher
-
-def issues_similar(gt, agent) -> float:
-    name_sim = SequenceMatcher(None, gt["name"], agent["name"]).ratio()
-    state_match = 1.0 if gt["state_id"] == agent["state_id"] else 0.0
-    return 0.6 * name_sim + 0.4 * state_match
-```
-
-`row_similarity` is the recommended hook for per-table customization. The fuller `WriteComparator` protocol (`CompositeComparator(table_comparators=...)`) is still available when you need access to `FieldConfig`, UUID mapping state, or want to emit structured per-field results.
-
-## What's in `result`
-
-```python
-result.scores                   # dict[str, float] — one entry per registered ScoreFn
-result.feedback_report          # LLM-consumable narrative string
-result.terms                    # SessionScoringTerms — every raw signal
-result.scored_graph             # agent graph with per-op structural + content utility
-result.matched_writes           # rows the agent got right (with per-field similarities)
-result.missing_writes           # GT rows the agent never produced
-result.extra_writes             # agent rows with no GT counterpart
-result.entity_state_comparisons # per-entity final-state diffs
-```
-
-`SessionScoringTerms` carries the raw signals every `ScoreFn` gets:
-
-```python
-terms.structural_score      # presence/recall across entities at the final state
-terms.content_score         # mean per-field similarity across matched rows
-terms.relationship_score    # fraction of GT foreign-key links preserved
-terms.efficiency            # op count ratio × (1 − waste ratio)
-terms.op_utilities          # list[OpUtility] — per-op structural + content utility
-terms.matched_row_count
-terms.missing_row_count
-terms.extra_row_count
-terms.gt_operation_count
-terms.agent_operation_count
-```
-
-## How It Works
-
-1. **Extraction** — rows are read from the COW `*_changes` tables and grouped by `operation_id` into graph nodes. Edges come from foreign-key relationships.
-2. **Matching** — rows are matched across the full session (not per node): GT might use 1 bulk write where the agent used 3 individual calls. The scorer pairs GT rows with the best agent row by table, delete/upsert type, and field similarity. UUID mapping handles the fact that GT and agent create entities with different UUIDs.
-3. **Field comparison** — each field is compared by SQL type. Text is fuzzy (`SequenceMatcher.ratio()`), enums/bool/int/uuid/json are exact, primary keys and timestamps are skipped. Every comparison produces a similarity in `[0, 1]`.
-4. **Entity state** (the *destination*) — collapse all rows to each entity's final state, then run matching. Produces `structural_score`, `content_score`, `relationship_score`.
-5. **Op-level utility** (the *journey*) — for each agent op, compute `structural_utility` (change in structural score) and `content_utility` (mean similarity of the rows that op contributed).
-6. **Efficiency** — `op_count_ratio × (1 − waste_ratio)`, where waste is agent entities that were created *and* deleted in the same session without ever matching GT.
-7. **Reduce** — the registered `ScoreFn`s reduce `SessionScoringTerms` into `result.scores`, and the `FeedbackFn` writes `result.feedback_report`.
-
-## Config
-
-All optional — pass a `ScoringConfig` to override defaults:
-
-```python
-from agentcow.scoring import ScoringConfig, CompositeComparator
-
-ScoringConfig(
-    score_fns={"overall": my_score_fn},  # default: {"overall": default_score_fn}
-    feedback_fn=my_feedback_fn,          # default: default_feedback_fn (LLM-ready narrative)
-    row_similarity={                     # per-table (gt_row, agent_row) -> bool|float
-        "issues": my_issues_similar,
-    },
-    comparator=CompositeComparator(      # escape hatch: full WriteComparator protocol
-        table_comparators={"my_table": MyTableComparator()},
-    ),
-    collapse=False,                      # True → evaluate final state only (pure outcome)
-    match_threshold=0.8,                 # similarity cutoff for binary match/no-match
-    exact_match_threshold=0.9999,        # pass-1 lock-in cutoff for near-perfect pairings
-    ignored_fields={"updated_at"},       # fields to skip during comparison
-)
-```
-
-`collapse=False` (default) keeps every raw row so create-then-delete waste is penalized. `collapse=True` removes cancelling writes before matching for a pure outcome-based evaluation.
-
-## API
+Pass any number of `(ScoringResult) -> float` callables and they get evaluated after the core signals:
 
 ```python
 from agentcow.scoring import (
-    score_cow_sessions,   # executor-based: fetches both sessions, then scores
-    score_sessions,       # graph-based: score two pre-built CowGraphs
-    ScoringConfig,
-    ScoringResult,
-    SessionScoringTerms,
-    default_score_fn, precision, recall, f1,
-    default_feedback_fn,
-    from_row_similarity, SimilarityResult, RowSimilarityFn,
-    CompositeComparator, DatatypeComparator,
+    score_cow_sessions, default_score_fn, precision, recall, f1,
+)
+
+result = await score_cow_sessions(
+    executor=executor,
+    ground_truth_session_id=gt_id,
+    agent_session_id=agent_id,
+    schema="public",
+    score_fns={
+        "overall": default_score_fn,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+    },
+)
+result.scores["overall"]   # 0.5*struct + 0.3*content + 0.2*efficiency
+```
+
+`default_score_fn` is the built-in convenience weighting; you can swap it for anything that maps a `ScoringResult` to a float.
+
+## `collapse=True`
+
+By default the scorer evaluates every row the agent wrote, so a create-then-delete cycle penalizes efficiency (wasted ops) and possibly struct (unmatched extra). Pass `collapse=True` to drop entities that the agent created and later deleted within the session before scoring — useful when you only care about the agent's net intent:
+
+```python
+result = await score_cow_sessions(..., collapse=True)
+```
+
+Op IDs on surviving rows are preserved, so the per-op breakdown still makes sense.
+
+## How it works
+
+1. **Extraction** — rows are read from `*_changes` tables, grouped by `operation_id`, sorted by `_cow_updated_at`.
+2. **Matching** — both sides are reduced to one row per `(table, pk)` (last write wins). Each GT entity greedily picks the best agent entity in the same table with matching `is_delete`. UUID mapping handles the fact that GT and agent create entities with different UUIDs.
+3. **Field comparison** — each field is compared by SQL type. Text uses `SequenceMatcher.ratio()`, JSON is deep-equal, everything else is exact. PKs, FKs (compared via UUID mapping), timestamps, and configured `ignored_fields` are skipped for content scoring.
+4. **Per-op flow** — for each agent op in topological order, the cumulative agent rows are re-scored against GT and the delta is recorded in `op_struct_scores` / `op_content_scores`.
+5. **Efficiency** — `min(1, gt_ops/agent_ops) * (1 - wasted_ops/agent_ops)`, where a wasted op is one whose only effect was an unmatched create-then-delete cycle.
+6. **Reduce** — registered `score_fns` reduce the `ScoringResult` into entries on `result.scores`.
+
+## Custom row comparison
+
+The default per-row comparator is `DatatypeComparator`. To override how a specific table compares, pass either:
+
+- `row_similarity={"table_name": fn, ...}` where `fn(gt_row, agent_row) -> bool | float` is the simplest hook. Return `True`/`False`, a graded float in `[0, 1]`, or raise `AssertionError` for assertion-style helpers. Agent FK UUIDs are pre-remapped into GT space so direct `==` works.
+- `comparator=DatatypeComparator(table_comparators={...})` for full control. Each table comparator implements the `WriteComparator` protocol (one `.compare(gt, agent, table_meta, uuid_mapping, ignored_fields) -> float` method); tables not in the map fall through to datatype-aware comparison.
+
+```python
+from agentcow.scoring import score_cow_sessions
+from agentcow.scoring.sample_evaluators import metadata_priority_match
+
+result = await score_cow_sessions(
+    executor=executor,
+    ground_truth_session_id=gt_id,
+    agent_session_id=agent_id,
+    schema="public",
+    row_similarity={"tasks": metadata_priority_match},
 )
 ```
 
-Use `score_sessions` directly when you already have `CowGraph`s in memory (e.g. from tests or a non-Postgres backend); use `score_cow_sessions` to pull from a live Postgres schema.
+`metadata_priority_match` is a sample `RowSimilarityFn` that compares only `metadata.priority` inside a `jsonb` column — see `sample_evaluators.py` for it plus a couple of name-equality variants (including an assertion-style one).
+
+## TODO
+
+- **`feedback_report`** — LLM-consumable narrative summarising matched / missing / extra rows.

@@ -1,180 +1,129 @@
 """
-Top-level orchestration for graph-based COW session scoring.
+Top-level COW session scoring flow.
+
+Implements the pseudocode "flow" section: iterate through agent ops in
+topological order, compute the cumulative struct/content scores at each step,
+record the per-op delta, then layer in efficiency and any user-supplied
+``score_fns``.
 """
 
 from __future__ import annotations
 
-import logging
 from typing import Optional
 from uuid import UUID
 
-from .comparators import CompositeComparator, DatatypeComparator, FieldConfig, WriteComparator
-from .efficiency import compute_efficiency
-from .entity_state import compute_entity_state_score, flatten_graph
-from .row_similarity import from_row_similarity
+from .compare import (
+    DatatypeComparator,
+    RowSimilarityFn,
+    WriteComparator,
+    from_row_similarity,
+)
 from .extraction import (
     Executor,
-    extract_session_graph,
-    get_table_column_types,
-    get_table_fk_columns,
-    get_table_pk_columns,
+    get_rows_changed,
+    get_session_operations,
+    get_table_metadata,
 )
-from .feedback import default_feedback_fn
-from .matching import collapse_to_final_state
-from .op_utility import compute_op_utilities
-from .sample_scorers import default_score_fn
+from .matching import drop_wasted_rows, get_wasted_ops, match_rows
+from .scores import content_score, efficiency, struct_score
 from .types import (
-    CowGraph,
-    CowNode,
+    CHANGE_TABLE_RESERVED_FIELDS,
     CowWrite,
-    EntityComparison,
-    EntityStateResult,
-    ExtraWrite,
-    FeedbackFn,
-    MatchedWrite,
-    MissingWrite,
-    OpUtility,
-    ScoredGraph,
-    ScoredNode,
     ScoreFn,
-    ScoringConfig,
     ScoringResult,
-    SessionScoringTerms,
+    TableMeta,
 )
 
-logger = logging.getLogger(__name__)
 
-
-async def build_field_config(
-    executor: Executor,
-    schema: str,
-    tables: list[str],
-    ignored_fields: Optional[set[str]] = None,
-) -> FieldConfig:
-    config = FieldConfig()
-    if ignored_fields is not None:
-        config.ignored_fields = set(ignored_fields)
-
-    for table_name in tables:
-        pk_cols = await get_table_pk_columns(executor, schema, table_name)
-        fk_cols = await get_table_fk_columns(executor, schema, table_name)
-        col_types = await get_table_column_types(executor, schema, table_name)
-        config.set_table_metadata(
-            table_name, set(pk_cols), fk_cols, column_types=col_types
-        )
-    return config
-
-
-def build_empty_field_config(
-    graphs: list[CowGraph], ignored_fields: Optional[set[str]] = None
-) -> FieldConfig:
-    config = FieldConfig()
-    if ignored_fields is not None:
-        config.ignored_fields = set(ignored_fields)
-    tables: dict[str, set[str]] = {}
-    for graph in graphs:
-        for row in graph.all_rows():
-            tables.setdefault(row.table_name, set()).update(row.primary_key.keys())
-    for table_name, pk_cols in tables.items():
-        config.set_table_metadata(table_name, pk_cols, set(), column_types={})
-    return config
+DEFAULT_IGNORED_FIELDS: set[str] = {
+    *CHANGE_TABLE_RESERVED_FIELDS,
+    "timestamp",
+    "created_at",
+    "updated_at",
+    "deleted_at",
+}
 
 
 async def score_sessions(
-    ground_truth: CowGraph,
-    agent: CowGraph,
+    rows_gt: list[CowWrite],
+    rows_a: list[CowWrite],
+    table_meta: dict[str, TableMeta],
     *,
-    config: Optional[ScoringConfig] = None,
-    executor: Optional[Executor] = None,
-    schema: Optional[str] = None,
-    field_config: Optional[FieldConfig] = None,
+    score_fns: Optional[dict[str, ScoreFn]] = None,
+    ignored_fields: Optional[set[str]] = None,
+    collapse: bool = False,
+    comparator: Optional[WriteComparator] = None,
+    row_similarity: Optional[dict[str, RowSimilarityFn]] = None,
 ) -> ScoringResult:
-    config = config or ScoringConfig()
-    comparator: WriteComparator = _build_comparator(config)
+    """Score an agent session against a ground-truth session.
 
-    gt_graph, agent_graph = ground_truth, agent
-    if config.collapse:
-        gt_graph = _collapse_graph(gt_graph)
-        agent_graph = _collapse_graph(agent_graph)
+    ``collapse=True`` drops rows from create-then-delete cycles before
+    iteration, so the scorer evaluates net intent rather than transient
+    activity. Op IDs are preserved on surviving rows.
 
-    if field_config is None:
-        all_tables = sorted(
-            {row.table_name for row in gt_graph.all_rows() + agent_graph.all_rows()}
-        )
-        if executor is not None and schema is not None and all_tables:
-            field_config = await build_field_config(
-                executor, schema, all_tables, ignored_fields=config.ignored_fields
-            )
-        else:
-            field_config = build_empty_field_config(
-                [gt_graph, agent_graph], ignored_fields=config.ignored_fields
-            )
-    elif config.ignored_fields is not None:
-        field_config.ignored_fields = set(config.ignored_fields)
+    Customization (mutually exclusive — pass at most one):
 
-    entity_result = compute_entity_state_score(
-        gt_graph, agent_graph, comparator, field_config
+    * ``comparator``: a :class:`WriteComparator` to use everywhere. Build a
+      ``DatatypeComparator(table_comparators=...)`` directly when you need
+      full control.
+    * ``row_similarity``: convenience map of
+      ``{table_name: (gt_row, agent_row) -> bool | float}`` callables. Each
+      one is wrapped via :func:`from_row_similarity` and dropped into a
+      :class:`DatatypeComparator` as a per-table override.
+    """
+    ignored = ignored_fields if ignored_fields is not None else DEFAULT_IGNORED_FIELDS
+    comparator = _resolve_comparator(comparator, row_similarity)
+
+    if collapse:
+        rows_gt = drop_wasted_rows(rows_gt)
+        rows_a = drop_wasted_rows(rows_a)
+
+    op_ids_gt = get_session_operations(rows_gt)
+    op_ids_a = get_session_operations(rows_a)
+
+    rows_by_op: dict[UUID, list[CowWrite]] = {}
+    for row in rows_a:
+        rows_by_op.setdefault(row.operation_id, []).append(row)
+
+    cur_struct = struct_score(rows_gt, [], table_meta, ignored, comparator=comparator)
+    cur_content = content_score(rows_gt, [], table_meta, ignored, comparator=comparator)
+
+    op_struct: dict[UUID, float] = {}
+    op_content: dict[UUID, float] = {}
+    applied: list[CowWrite] = []
+    for op_id in op_ids_a:
+        applied.extend(rows_by_op.get(op_id, []))
+        new_struct = struct_score(rows_gt, applied, table_meta, ignored, comparator=comparator)
+        new_content = content_score(rows_gt, applied, table_meta, ignored, comparator=comparator)
+        op_struct[op_id] = new_struct - cur_struct
+        op_content[op_id] = new_content - cur_content
+        cur_struct = new_struct
+        cur_content = new_content
+
+    matched, missing, extra = match_rows(
+        rows_gt, rows_a, table_meta, ignored, comparator=comparator
     )
-
-    matched_agent_pks = _matched_agent_pks(entity_result)
-    efficiency_result = compute_efficiency(gt_graph, agent_graph, matched_agent_pks)
-
-    matched_writes, missing_writes, extra_writes = _split_entity_comparisons(
-        entity_result,
-        gt_graph,
-        agent_graph,
-        comparator,
-        field_config,
-        config.exact_match_threshold,
-    )
-
-    extra_by_op: dict[UUID, int] = {}
-    for extra_write in extra_writes:
-        extra_by_op[extra_write.agent.operation_id] = (
-            extra_by_op.get(extra_write.agent.operation_id, 0) + 1
-        )
-
-    op_utilities = compute_op_utilities(
-        gt_graph,
-        agent_graph,
-        comparator,
-        field_config,
-        matched_writes=matched_writes,
-        extra_writes_by_op=extra_by_op,
-    )
-
-    terms = SessionScoringTerms(
-        op_utilities=op_utilities,
-        structural_score=entity_result.structural_score,
-        content_score=entity_result.content_score,
-        relationship_score=entity_result.relationship_score,
-        efficiency=efficiency_result.efficiency,
-        gt_operation_count=len(gt_graph.nodes),
-        agent_operation_count=len(agent_graph.nodes),
-        matched_row_count=len(matched_writes),
-        missing_row_count=len(missing_writes),
-        extra_row_count=len(extra_writes),
-    )
-
-    score_fns: dict[str, ScoreFn] = config.score_fns or {"overall": default_score_fn}
-    scores = {name: fn(terms) for name, fn in score_fns.items()}
-
-    scored_graph = _build_scored_graph(
-        agent_graph, op_utilities, matched_writes, extra_writes
-    )
+    matched_pks = {agent.get_pk_tuple() for _gt, agent, _sim in matched}
+    wasted = get_wasted_ops(rows_a, matched_pks)
+    eff = efficiency(op_ids_gt, op_ids_a, wasted)
 
     result = ScoringResult(
-        scores=scores,
-        feedback_report="",
-        terms=terms,
-        scored_graph=scored_graph,
-        matched_writes=matched_writes,
-        missing_writes=missing_writes,
-        extra_writes=extra_writes,
-        entity_state_comparisons=list(entity_result.comparisons),
+        struct_score=cur_struct,
+        content_score=cur_content,
+        efficiency=eff,
+        op_struct_scores=op_struct,
+        op_content_scores=op_content,
+        counts={
+            "matched": len(matched),
+            "missing": len(missing),
+            "extra": len(extra),
+            "gt_ops": len(op_ids_gt),
+            "agent_ops": len(op_ids_a),
+        },
     )
-    feedback_fn: FeedbackFn = config.feedback_fn or default_feedback_fn
-    result.feedback_report = feedback_fn(result)
+
+    for name, fn in (score_fns or {}).items():
+        result.scores[name] = fn(result)
     return result
 
 
@@ -184,129 +133,45 @@ async def score_cow_sessions(
     agent_session_id: UUID,
     schema: str,
     *,
-    config: Optional[ScoringConfig] = None,
+    score_fns: Optional[dict[str, ScoreFn]] = None,
+    ignored_fields: Optional[set[str]] = None,
     excluded_tables: Optional[set[str]] = None,
+    collapse: bool = False,
+    comparator: Optional[WriteComparator] = None,
+    row_similarity: Optional[dict[str, RowSimilarityFn]] = None,
 ) -> ScoringResult:
-    gt_graph = await extract_session_graph(
+    """Pull both sessions from Postgres, then score."""
+    rows_gt = await get_rows_changed(
         executor, schema, ground_truth_session_id, excluded_tables=excluded_tables
     )
-    agent_graph = await extract_session_graph(
+    rows_a = await get_rows_changed(
         executor, schema, agent_session_id, excluded_tables=excluded_tables
     )
+    tables = sorted({r.table_name for r in rows_gt} | {r.table_name for r in rows_a})
+    table_meta = await get_table_metadata(executor, schema, tables)
+
     return await score_sessions(
-        ground_truth=gt_graph,
-        agent=agent_graph,
-        config=config,
-        executor=executor,
-        schema=schema,
+        rows_gt,
+        rows_a,
+        table_meta,
+        score_fns=score_fns,
+        ignored_fields=ignored_fields,
+        collapse=collapse,
+        comparator=comparator,
+        row_similarity=row_similarity,
     )
 
 
-def _build_comparator(config: ScoringConfig) -> WriteComparator:
-    """Compose a ``WriteComparator`` from explicit config + per-table row similarity fns."""
-    threshold = config.match_threshold
-    default: WriteComparator = DatatypeComparator(match_threshold=threshold)
-    table_comparators: dict[str, WriteComparator] = {}
-
-    if isinstance(config.comparator, CompositeComparator):
-        table_comparators.update(config.comparator.table_comparators)
-        default = config.comparator.default
-    elif config.comparator is not None:
-        default = config.comparator
-
-    if config.row_similarity:
-        for table_name, fn in config.row_similarity.items():
-            table_comparators[table_name] = from_row_similarity(
-                fn, match_threshold=threshold
-            )
-
-    if not table_comparators and isinstance(config.comparator, CompositeComparator):
-        return config.comparator
-    if not table_comparators and config.comparator is not None:
-        return config.comparator
-
-    return CompositeComparator(
-        table_comparators=table_comparators,
-        default=default,
-        match_threshold=threshold,
-    )
-
-
-def _collapse_graph(graph: CowGraph) -> CowGraph:
-    collapsed_rows = collapse_to_final_state(flatten_graph(graph))
-    if not collapsed_rows:
-        return CowGraph()
-    first_op = collapsed_rows[0].operation_id
-    timestamp = min(row.updated_at for row in collapsed_rows)
-    node = CowNode(op_id=first_op, timestamp=timestamp, rows=collapsed_rows)
-    return CowGraph(nodes={first_op: node})
-
-
-def _matched_agent_pks(entity_result: EntityStateResult) -> set[tuple]:
-    pks: set[tuple] = set()
-    for comparison in entity_result.comparisons:
-        if comparison.status != "matched":
-            continue
-        pks.add((comparison.table_name, tuple(sorted(comparison.primary_key.items()))))
-    return pks
-
-
-def _split_entity_comparisons(
-    entity_result: EntityStateResult,
-    gt_graph: CowGraph,
-    agent_graph: CowGraph,
-    comparator: WriteComparator,
-    field_config: FieldConfig,
-    exact_match_threshold: float,
-) -> tuple[list[MatchedWrite], list[MissingWrite], list[ExtraWrite]]:
-    from .matching import match_writes
-
-    gt_final = collapse_to_final_state(flatten_graph(gt_graph))
-    agent_final = collapse_to_final_state(flatten_graph(agent_graph))
-
-    _ = entity_result
-
-    result = match_writes(
-        gt_final,
-        agent_final,
-        comparator,
-        field_config,
-        exact_match_threshold=exact_match_threshold,
-    )
-    return result.matched_writes, result.missing_writes, result.extra_writes
-
-
-def _build_scored_graph(
-    agent_graph: CowGraph,
-    op_utilities: list[OpUtility],
-    matched_writes: list[MatchedWrite],
-    extra_writes: list[ExtraWrite],
-) -> ScoredGraph:
-    utility_by_op: dict[UUID, OpUtility] = {utility.op_id: utility for utility in op_utilities}
-
-    matched_by_op: dict[UUID, list[MatchedWrite]] = {}
-    for matched_write in matched_writes:
-        matched_by_op.setdefault(matched_write.agent.operation_id, []).append(
-            matched_write
+def _resolve_comparator(
+    comparator: Optional[WriteComparator],
+    row_similarity: Optional[dict[str, RowSimilarityFn]],
+) -> WriteComparator:
+    if comparator is not None and row_similarity:
+        raise ValueError("Pass `comparator` or `row_similarity`, not both.")
+    if comparator is not None:
+        return comparator
+    if row_similarity:
+        return DatatypeComparator(
+            table_comparators={t: from_row_similarity(fn) for t, fn in row_similarity.items()}
         )
-
-    extras_by_op: dict[UUID, list[CowWrite]] = {}
-    for extra_write in extra_writes:
-        extras_by_op.setdefault(extra_write.agent.operation_id, []).append(
-            extra_write.agent
-        )
-
-    scored: dict[UUID, ScoredNode] = {}
-    for node in agent_graph.topologically_sorted_nodes():
-        utility = utility_by_op.get(node.op_id)
-        scored[node.op_id] = ScoredNode(
-            op_id=node.op_id,
-            metadata=node.metadata,
-            structural_utility=utility.structural_utility if utility else 0.0,
-            structural_score_before=utility.structural_score_before if utility else 0.0,
-            structural_score_after=utility.structural_score_after if utility else 0.0,
-            content_utility=utility.content_utility if utility else 0.0,
-            matched_rows=matched_by_op.get(node.op_id, []),
-            extra_rows=extras_by_op.get(node.op_id, []),
-        )
-    return ScoredGraph(nodes=scored)
+    return DatatypeComparator()
