@@ -85,20 +85,17 @@ async def score_sessions(
     for row in rows_a:
         rows_by_op.setdefault(row.operation_id, []).append(row)
 
+    # Per-op structural utility = delta in cumulative struct score
     cur_struct = struct_score(rows_gt, [], table_meta, ignored, comparator=comparator)
-    cur_content = content_score(rows_gt, [], table_meta, ignored, comparator=comparator)
-
     op_struct: dict[UUID, float] = {}
-    op_content: dict[UUID, float] = {}
     applied: list[CowWrite] = []
     for op_id in op_ids_a:
         applied.extend(rows_by_op.get(op_id, []))
-        new_struct = struct_score(rows_gt, applied, table_meta, ignored, comparator=comparator)
-        new_content = content_score(rows_gt, applied, table_meta, ignored, comparator=comparator)
+        new_struct = struct_score(
+            rows_gt, applied, table_meta, ignored, comparator=comparator
+        )
         op_struct[op_id] = new_struct - cur_struct
-        op_content[op_id] = new_content - cur_content
         cur_struct = new_struct
-        cur_content = new_content
 
     matched, missing, extra = match_rows(
         rows_gt, rows_a, table_meta, ignored, comparator=comparator
@@ -107,9 +104,22 @@ async def score_sessions(
     wasted = get_wasted_ops(rows_a, matched_pks)
     eff = efficiency(op_ids_gt, op_ids_a, wasted)
 
+    # Per-op content utility = mean similarity over matched rows whose
+    # agent-side write originated in this op
+    sims_by_op: dict[UUID, list[float]] = {}
+    for _gt, agent, sim in matched:
+        sims_by_op.setdefault(agent.operation_id, []).append(sim)
+    op_content: dict[UUID, float] = {
+        op_id: sum(sims) / len(sims) for op_id, sims in sims_by_op.items()
+    }
+
+    final_content = content_score(
+        rows_gt, rows_a, table_meta, ignored, comparator=comparator
+    )
+
     result = ScoringResult(
         struct_score=cur_struct,
-        content_score=cur_content,
+        content_score=final_content,
         efficiency=eff,
         op_struct_scores=op_struct,
         op_content_scores=op_content,
@@ -172,6 +182,8 @@ def _resolve_comparator(
         return comparator
     if row_similarity:
         return DatatypeComparator(
-            table_comparators={t: from_row_similarity(fn) for t, fn in row_similarity.items()}
+            table_comparators={
+                t: from_row_similarity(fn) for t, fn in row_similarity.items()
+            }
         )
     return DatatypeComparator()

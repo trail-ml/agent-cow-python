@@ -25,8 +25,8 @@ result = await score_cow_sessions(
 result.struct_score      # entity coverage in [0, 1]
 result.content_score     # mean field-similarity across matched entities
 result.efficiency        # min(1, gt_ops/a_ops) * (1 - wasted/a_ops)
-result.op_struct_scores  # {op_id: delta_in_struct_score}
-result.op_content_scores # {op_id: delta_in_content_score}
+result.op_struct_scores  # {op_id: delta in cumulative struct_score}
+result.op_content_scores # {op_id: mean similarity over matched rows from this op}
 result.counts            # {"matched", "missing", "extra", "gt_ops", "agent_ops"}
 ```
 
@@ -71,7 +71,7 @@ Op IDs on surviving rows are preserved, so the per-op breakdown still makes sens
 1. **Extraction** — rows are read from `*_changes` tables, grouped by `operation_id`, sorted by `_cow_updated_at`.
 2. **Matching** — both sides are reduced to one row per `(table, pk)` (last write wins). Each GT entity greedily picks the best agent entity in the same table with matching `is_delete`. UUID mapping handles the fact that GT and agent create entities with different UUIDs.
 3. **Field comparison** — each field is compared by SQL type. Text uses `SequenceMatcher.ratio()`, JSON is deep-equal, everything else is exact. PKs, FKs (compared via UUID mapping), timestamps, and configured `ignored_fields` are skipped for content scoring.
-4. **Per-op flow** — for each agent op in topological order, the cumulative agent rows are re-scored against GT and the delta is recorded in `op_struct_scores` / `op_content_scores`.
+4. **Per-op flow** — for each agent op in topological order, the cumulative agent rows are re-scored against GT and the delta is recorded in `op_struct_scores`. `op_content_scores` is computed independently from the final matching: each op gets the mean per-field similarity over matched rows whose agent-side write came from it (ops with no matched rows are omitted, so a weighted mean recovers `content_score`).
 5. **Efficiency** — `min(1, gt_ops/agent_ops) * (1 - wasted_ops/agent_ops)`, where a wasted op is one whose only effect was an unmatched create-then-delete cycle.
 6. **Reduce** — registered `score_fns` reduce the `ScoringResult` into entries on `result.scores`.
 
