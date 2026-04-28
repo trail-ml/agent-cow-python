@@ -1,306 +1,175 @@
 """
-Row-level matching between GT and agent writes.
+Row matching helpers for COW session scoring.
+
+* :func:`match_rows` — pair ground truth entities with their best agent counterpart.
+  Internally runs two passes: a first match with no UUID mapping, then a
+  second pass using the mapping derived from the first match's pairings, so
+  FK comparisons between session-created entities work end-to-end.
+* :func:`get_wasted_ops` — agent ops whose only contribution was unmatched
+  create-then-delete pairs.
+* :func:`drop_wasted_rows` — remove create-then-delete cycles, used by
+  ``collapse=True``.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass, field
 from typing import Optional
 from uuid import UUID
 
-from .comparators import FieldConfig, WriteComparator, WriteComparisonResult
-from .types import CowWrite, ExtraWrite, MatchedWrite, MissingWrite
+from .compare import DatatypeComparator, WriteComparator
+from .types import CowWrite, TableMeta
 
 
-DEFAULT_EXACT_MATCH_THRESHOLD = 0.9999
+def match_rows(
+    rows_gt: list[CowWrite],
+    rows_a: list[CowWrite],
+    table_meta: dict[str, TableMeta],
+    ignored_fields: set[str],
+    *,
+    comparator: Optional[WriteComparator] = None,
+) -> tuple[
+    list[tuple[CowWrite, CowWrite, float]],
+    list[CowWrite],
+    list[CowWrite],
+]:
+    """Pair ground truth entities with their best agent counterpart.
+
+    Both sides are first reduced to one row per primary key (last write wins).
+    Then each ground truth entity greedily picks its best unused agent candidate from
+    the same table with matching ``is_delete``. We run the greedy pass twice:
+    the first builds a UUID mapping from the PK pairings it finds, the second
+    re-matches with that mapping so FK columns line up.
+
+    ``comparator`` defaults to :class:`DatatypeComparator`.
+
+    Returns ``(matched, missing, extra)``:
+
+    * ``matched``: list of ``(gt, agent, similarity)`` tuples
+    * ``missing``: ground truth entities with no agent counterpart
+    * ``extra``: agent entities not paired to any ground truth entity
+    """
+    comparator = comparator or DatatypeComparator()
+    gt_final = _last_write_per_pk(rows_gt)
+    agent_final = _last_write_per_pk(rows_a)
+
+    matched, _, _ = _greedy_match(
+        gt_final, agent_final, table_meta, ignored_fields, {}, comparator
+    )
+    uuid_mapping = _map_uuids(matched)
+    return _greedy_match(
+        gt_final, agent_final, table_meta, ignored_fields, uuid_mapping, comparator
+    )
 
 
-@dataclass
-class MatchResult:
-    matched_writes: list[MatchedWrite] = field(default_factory=list)
-    missing_writes: list[MissingWrite] = field(default_factory=list)
-    extra_writes: list[ExtraWrite] = field(default_factory=list)
-    uuid_mapping: dict[UUID, UUID] = field(default_factory=dict)
+def get_wasted_ops(
+    rows_a: list[CowWrite],
+    matched_pks: set[tuple],
+) -> list[UUID]:
+    """Return agent op IDs whose only effect was an unmatched create+delete cycle.
+
+    An op is wasted if every entity it touched was created and later deleted in
+    the same session without ever matching a ground truth row.
+    """
+    wasted_pks = _redundant_pks(rows_a) - matched_pks
+
+    op_to_pks: dict[UUID, set[tuple]] = defaultdict(set)
+    for row in rows_a:
+        op_to_pks[row.operation_id].add(row.get_pk_tuple())
+
+    return [op_id for op_id, pks in op_to_pks.items() if pks and pks <= wasted_pks]
 
 
-def collapse_to_final_state(writes: list[CowWrite]) -> list[CowWrite]:
-    """Keep only the last write per entity; drop create-then-delete pairs."""
+def drop_wasted_rows(rows: list[CowWrite]) -> list[CowWrite]:
+    """Remove rows belonging to create-then-delete cycles within the session.
+
+    Used by ``collapse=True`` to evaluate net intent rather than transient
+    activity. Op IDs are preserved on the surviving rows.
+    """
+    cancelled = _redundant_pks(rows)
+    return [r for r in rows if r.get_pk_tuple() not in cancelled]
+
+
+def _redundant_pks(rows: list[CowWrite]) -> set[tuple]:
+    """PKs of entities created and later deleted within these rows."""
     grouped: dict[tuple, list[CowWrite]] = defaultdict(list)
-    for write in writes:
-        grouped[write.get_pk_tuple()].append(write)
+    for row in rows:
+        grouped[row.get_pk_tuple()].append(row)
 
-    final: list[CowWrite] = []
-    for rows in grouped.values():
-        rows.sort(key=lambda r: r.updated_at)
-        last = rows[-1]
-        has_create = any(not row.is_delete for row in rows)
-        if last.is_delete and has_create:
-            continue
-        final.append(last)
-    return final
-
-
-def get_created_uuids(writes: list[CowWrite]) -> set[UUID]:
-    created: set[UUID] = set()
-    for write in writes:
-        for value in write.primary_key.values():
-            if isinstance(value, UUID):
-                created.add(value)
-            elif isinstance(value, str):
-                try:
-                    created.add(UUID(value))
-                except (ValueError, AttributeError):
-                    pass
-    return created
+    cancelled: set[tuple] = set()
+    for pk_tuple, entries in grouped.items():
+        entries.sort(key=lambda r: r.updated_at)
+        has_create = any(not r.is_delete for r in entries)
+        ends_deleted = entries[-1].is_delete
+        if has_create and ends_deleted:
+            cancelled.add(pk_tuple)
+    return cancelled
 
 
-def topological_sort_writes(writes: list[CowWrite]) -> list[CowWrite]:
-    return sorted(writes, key=lambda write: write.updated_at)
-
-
-def find_best_match(
-    gt: CowWrite,
-    agent_candidates: list[CowWrite],
-    comparator: WriteComparator,
+def _greedy_match(
+    gt_final: list[CowWrite],
+    agent_final: list[CowWrite],
+    table_meta: dict[str, TableMeta],
+    ignored_fields: set[str],
     uuid_mapping: dict[UUID, UUID],
-    field_config: FieldConfig,
-    gt_created_uuids: set[UUID],
-    agent_created_uuids: set[UUID],
-    used_agent_keys: set[tuple],
-    exact_match_threshold: float = DEFAULT_EXACT_MATCH_THRESHOLD,
-) -> tuple[Optional[CowWrite], Optional[WriteComparisonResult]]:
-    best_agent: Optional[CowWrite] = None
-    best_result: Optional[WriteComparisonResult] = None
-    best_similarity = -1.0
-
-    for candidate in agent_candidates:
-        if candidate.get_pk_tuple() in used_agent_keys:
-            continue
-        if candidate.table_name != gt.table_name:
-            continue
-        if candidate.is_delete != gt.is_delete:
-            continue
-
-        result = comparator.compare(
-            gt,
-            candidate,
-            uuid_mapping,
-            field_config,
-            gt_created_uuids,
-            agent_created_uuids,
-        )
-
-        if result.similarity > best_similarity:
-            best_similarity = result.similarity
-            best_agent = candidate
-            best_result = result
-            if result.similarity >= exact_match_threshold:
-                break
-
-    return best_agent, best_result
-
-
-def _run_exact_match_pass(
-    gt_writes: list[CowWrite],
-    agent_writes: list[CowWrite],
     comparator: WriteComparator,
-    field_config: FieldConfig,
-    uuid_mapping: dict[UUID, UUID],
-    exact_match_threshold: float,
-) -> tuple[dict[tuple, tuple[CowWrite, WriteComparisonResult]], set[tuple]]:
-    gt_created = get_created_uuids(gt_writes)
-    agent_created = get_created_uuids(agent_writes)
-
+) -> tuple[
+    list[tuple[CowWrite, CowWrite, float]],
+    list[CowWrite],
+    list[CowWrite],
+]:
     agent_by_table: dict[str, list[CowWrite]] = defaultdict(list)
-    for agent_write in agent_writes:
-        agent_by_table[agent_write.table_name].append(agent_write)
+    for agent in agent_final:
+        agent_by_table[agent.table_name].append(agent)
 
-    matches: dict[tuple, tuple[CowWrite, WriteComparisonResult]] = {}
     used_agent_keys: set[tuple] = set()
+    matched: list[tuple[CowWrite, CowWrite, float]] = []
+    missing: list[CowWrite] = []
 
-    for gt in gt_writes:
-        candidates = agent_by_table.get(gt.table_name, [])
-        agent, result = find_best_match(
-            gt,
-            candidates,
-            comparator,
-            uuid_mapping,
-            field_config,
-            gt_created,
-            agent_created,
-            used_agent_keys,
-            exact_match_threshold=exact_match_threshold,
-        )
-        if agent is None or result is None:
-            continue
-        if result.similarity < exact_match_threshold:
-            continue
-        matches[gt.get_pk_tuple()] = (agent, result)
-        used_agent_keys.add(agent.get_pk_tuple())
+    for gt in gt_final:
+        meta = table_meta.get(gt.table_name) or TableMeta()
+        best_agent: Optional[CowWrite] = None
+        best_sim = 0.0
 
-    return matches, used_agent_keys
+        for candidate in agent_by_table.get(gt.table_name, []):
+            if candidate.get_pk_tuple() in used_agent_keys:
+                continue
+            if candidate.is_delete != gt.is_delete:
+                continue
 
+            sim = comparator.compare(gt, candidate, meta, uuid_mapping, ignored_fields)
+            if best_agent is None or sim > best_sim:
+                best_sim = sim
+                best_agent = candidate
 
-def _update_uuid_mapping(
-    uuid_mapping: dict[UUID, UUID],
-    matches: dict[tuple, tuple[CowWrite, WriteComparisonResult]],
-    gt_writes: list[CowWrite],
-) -> None:
-    gt_by_key = {write.get_pk_tuple(): write for write in gt_writes}
-    for gt_key, (agent, _result) in matches.items():
-        gt_write = gt_by_key.get(gt_key)
-        if gt_write is None:
-            continue
-        for column, gt_value in gt_write.primary_key.items():
-            agent_value = agent.primary_key.get(column)
-            gt_uuid = _try_uuid(gt_value)
-            agent_uuid = _try_uuid(agent_value)
-            if gt_uuid is not None and agent_uuid is not None:
-                uuid_mapping[gt_uuid] = agent_uuid
-
-
-def _try_uuid(value) -> Optional[UUID]:
-    if isinstance(value, UUID):
-        return value
-    if isinstance(value, str):
-        try:
-            return UUID(value)
-        except (ValueError, AttributeError):
-            return None
-    return None
-
-
-def _run_structural_match_pass(
-    gt_writes: list[CowWrite],
-    agent_writes: list[CowWrite],
-    comparator: WriteComparator,
-    field_config: FieldConfig,
-    uuid_mapping: dict[UUID, UUID],
-    existing_matches: dict[tuple, tuple[CowWrite, WriteComparisonResult]],
-    existing_used_agent_keys: set[tuple],
-    exact_match_threshold: float,
-) -> tuple[dict[tuple, tuple[CowWrite, WriteComparisonResult]], set[tuple]]:
-    gt_created = get_created_uuids(gt_writes)
-    agent_created = get_created_uuids(agent_writes)
-
-    leftover_gt = [
-        write for write in gt_writes if write.get_pk_tuple() not in existing_matches
-    ]
-    leftover_agent_by_key = {
-        agent.get_pk_tuple(): agent
-        for agent in agent_writes
-        if agent.get_pk_tuple() not in existing_used_agent_keys
-    }
-
-    matches: dict[tuple, tuple[CowWrite, WriteComparisonResult]] = {}
-    used_agent_keys: set[tuple] = set(existing_used_agent_keys)
-
-    for gt in leftover_gt:
-        candidates = [
-            agent
-            for agent in leftover_agent_by_key.values()
-            if agent.table_name == gt.table_name and agent.is_delete == gt.is_delete
-        ]
-        if not candidates:
-            continue
-
-        agent, result = find_best_match(
-            gt,
-            candidates,
-            comparator,
-            uuid_mapping,
-            field_config,
-            gt_created,
-            agent_created,
-            used_agent_keys,
-            exact_match_threshold=exact_match_threshold,
-        )
-        if agent is None or result is None:
-            continue
-
-        matches[gt.get_pk_tuple()] = (agent, result)
-        used_agent_keys.add(agent.get_pk_tuple())
-        leftover_agent_by_key.pop(agent.get_pk_tuple(), None)
-
-    return matches, used_agent_keys
-
-
-def match_writes(
-    gt_writes: list[CowWrite],
-    agent_writes: list[CowWrite],
-    comparator: WriteComparator,
-    field_config: FieldConfig,
-    seed_uuid_mapping: Optional[dict[UUID, UUID]] = None,
-    exact_match_threshold: float = DEFAULT_EXACT_MATCH_THRESHOLD,
-) -> MatchResult:
-    uuid_mapping: dict[UUID, UUID] = dict(seed_uuid_mapping or {})
-
-    exact_matches, exact_used_agent_keys = _run_exact_match_pass(
-        gt_writes,
-        agent_writes,
-        comparator,
-        field_config,
-        uuid_mapping,
-        exact_match_threshold,
-    )
-    _update_uuid_mapping(uuid_mapping, exact_matches, gt_writes)
-
-    structural_matches, used_agent_keys = _run_structural_match_pass(
-        gt_writes,
-        agent_writes,
-        comparator,
-        field_config,
-        uuid_mapping,
-        exact_matches,
-        exact_used_agent_keys,
-        exact_match_threshold,
-    )
-    _update_uuid_mapping(uuid_mapping, structural_matches, gt_writes)
-
-    all_matches: dict[tuple, tuple[CowWrite, WriteComparisonResult]] = {
-        **exact_matches,
-        **structural_matches,
-    }
-
-    matched: list[MatchedWrite] = []
-    missing: list[MissingWrite] = []
-    gt_by_key = {write.get_pk_tuple(): write for write in gt_writes}
-
-    for gt_key, gt_write in gt_by_key.items():
-        if gt_key in all_matches:
-            agent, result = all_matches[gt_key]
-            matched.append(
-                MatchedWrite(ground_truth=gt_write, agent=agent, comparison=result)
-            )
+        if best_agent is None:
+            missing.append(gt)
         else:
-            missing.append(
-                MissingWrite(
-                    ground_truth=gt_write,
-                    feedback=(
-                        f"No agent write found for {gt_write.table_name} "
-                        f"{gt_write.primary_key}"
-                    ),
-                )
-            )
+            matched.append((gt, best_agent, best_sim))
+            used_agent_keys.add(best_agent.get_pk_tuple())
 
-    extra: list[ExtraWrite] = []
-    for agent in agent_writes:
-        if agent.get_pk_tuple() in used_agent_keys:
-            continue
-        extra.append(
-            ExtraWrite(
-                agent=agent,
-                feedback=(
-                    f"Extra agent write for {agent.table_name} "
-                    f"{agent.primary_key} had no GT counterpart"
-                ),
-            )
-        )
+    extra = [a for a in agent_final if a.get_pk_tuple() not in used_agent_keys]
+    return matched, missing, extra
 
-    return MatchResult(
-        matched_writes=matched,
-        missing_writes=missing,
-        extra_writes=extra,
-        uuid_mapping=uuid_mapping,
-    )
+
+def _last_write_per_pk(rows: list[CowWrite]) -> list[CowWrite]:
+    """Reduce to one row per ``(table, pk)`` — the latest write."""
+    latest: dict[tuple, CowWrite] = {}
+    for row in rows:
+        existing = latest.get(row.get_pk_tuple())
+        if existing is None or row.updated_at >= existing.updated_at:
+            latest[row.get_pk_tuple()] = row
+    return list(latest.values())
+
+
+def _map_uuids(
+    matched: list[tuple[CowWrite, CowWrite, float]],
+) -> dict[UUID, UUID]:
+    """Build ``{gt_uuid -> agent_uuid}`` from matched primary-key pairs."""
+    mapping: dict[UUID, UUID] = {}
+    for gt, agent, _sim in matched:
+        for column, gt_value in gt.primary_key.items():
+            agent_value = agent.primary_key.get(column)
+            if isinstance(gt_value, UUID) and isinstance(agent_value, UUID):
+                mapping[gt_value] = agent_value
+    return mapping
