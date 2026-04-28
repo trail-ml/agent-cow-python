@@ -1,6 +1,6 @@
 """agent-cow: Database Copy-On-Write for AI agent workspace isolation."""
 
-__version__ = "0.1.6"
+__version__ = "0.1.7"
 
 from .context import CowConfig
 
