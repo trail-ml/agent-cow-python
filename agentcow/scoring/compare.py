@@ -5,7 +5,7 @@ Two pieces of public API:
 
 * :class:`WriteComparator` — Protocol every comparator implements.
 * :class:`DatatypeComparator` — the default. Skips PKs/timestamps/ignored
-  fields, pre-remaps FK UUIDs into GT space, then dispatches each remaining
+  fields, pre-remaps FK UUIDs into ground truth space, then dispatches each remaining
   field through ``_TYPE_COMPARATORS`` based on its Postgres ``data_type``.
   Accepts an optional ``table_comparators={table_name: WriteComparator}``
   map so callers can override the rule for one table without touching the
@@ -14,6 +14,7 @@ Two pieces of public API:
 
 from __future__ import annotations
 
+import json
 from difflib import SequenceMatcher
 from typing import Any, Callable, Protocol, runtime_checkable
 from uuid import UUID
@@ -44,7 +45,11 @@ def _compare_text(gt: Any, agent: Any) -> float:
 
 
 def _compare_json(gt: Any, agent: Any) -> float:
-    return 1.0 if _json_equal(gt, agent) else 0.0
+    return (
+        1.0
+        if json.dumps(gt, sort_keys=True) == json.dumps(agent, sort_keys=True)
+        else 0.0
+    )
 
 
 def _compare_exact(gt: Any, agent: Any) -> float:
@@ -70,33 +75,13 @@ _TIMESTAMP_TYPES = {
 }
 
 
-def _json_equal(a: Any, b: Any) -> bool:
-    if isinstance(a, list) and isinstance(b, list):
-        if len(a) != len(b):
-            return False
-        b_remaining = list(b)
-        for item in a:
-            for i, candidate in enumerate(b_remaining):
-                if _json_equal(item, candidate):
-                    b_remaining.pop(i)
-                    break
-            else:
-                return False
-        return True
-    if isinstance(a, dict) and isinstance(b, dict):
-        if set(a.keys()) != set(b.keys()):
-            return False
-        return all(_json_equal(a[k], b[k]) for k in a)
-    return a == b
-
-
 class DatatypeComparator:
     """Default per-row comparator with optional per-table overrides.
 
     If ``table_comparators`` is provided and the row's ``table_name`` matches
     a key, delegates to that comparator and skips the built-in logic.
     Otherwise: PKs, timestamps, and ``ignored_fields`` are skipped, FK fields
-    are pre-remapped into GT UUID space (so that GT and agent rows referring
+    are pre-remapped into ground truth UUID space (so that ground truth and agent rows referring
     to the same matched entity compare equal), and each remaining field is
     dispatched through ``_TYPE_COMPARATORS`` based on its Postgres
     ``data_type`` (anything not in the dict falls back to exact equality).
@@ -169,7 +154,7 @@ class DatatypeComparator:
 class _RowSimilarityAdapter:
     """Wraps a :data:`RowSimilarityFn` so it satisfies :class:`WriteComparator`.
 
-    Pre-remaps agent FK UUIDs into GT space so direct ``==`` on FK columns
+    Pre-remaps agent FK UUIDs into ground truth space so direct ``==`` on FK columns
     works inside the user's callable. ``AssertionError`` raised from the
     callable is treated as ``0.0`` so assertion-style helpers drop in
     unchanged.
@@ -204,7 +189,7 @@ def from_row_similarity(fn: RowSimilarityFn) -> WriteComparator:
     """Adapt a ``(gt_row, agent_row) -> bool | float`` into a ``WriteComparator``.
 
     The two ``dict`` arguments are the row's ``data`` payload (column ->
-    value). Agent FK UUIDs have already been remapped into GT space when
+    value). Agent FK UUIDs have already been remapped into ground truth space when
     a mapping exists. Return values:
 
     * ``True`` / ``False`` — interpreted as ``1.0`` / ``0.0``.

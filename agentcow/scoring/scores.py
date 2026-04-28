@@ -1,7 +1,5 @@
 """
-Score calculations for COW session scoring.
-
-Mirrors the pseudocode "score calculations" section:
+Score calculations for COW session scoring:
 
 * :func:`struct_score` — fraction of the union of GT/agent entities that matched
 * :func:`content_score` — mean field-level similarity across matched rows
@@ -61,7 +59,7 @@ def efficiency(
     op_ids_a: list[UUID],
     wasted_ops: list[UUID],
 ) -> float:
-    """``min(1, gt/a) * (1 - wasted/a)`` — the pseudocode formula."""
+    """``min(1, gt/a) * (1 - wasted/a)``."""
     a = len(op_ids_a)
     if a == 0:
         return 1.0

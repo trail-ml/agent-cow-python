@@ -1,7 +1,7 @@
 """
 Row matching helpers for COW session scoring.
 
-* :func:`match_rows` — pair GT entities with their best agent counterpart.
+* :func:`match_rows` — pair ground truth entities with their best agent counterpart.
   Internally runs two passes: a first match with no UUID mapping, then a
   second pass using the mapping derived from the first match's pairings, so
   FK comparisons between session-created entities work end-to-end.
@@ -33,10 +33,10 @@ def match_rows(
     list[CowWrite],
     list[CowWrite],
 ]:
-    """Pair GT entities with their best agent counterpart.
+    """Pair ground truth entities with their best agent counterpart.
 
     Both sides are first reduced to one row per primary key (last write wins).
-    Then each GT entity greedily picks its best unused agent candidate from
+    Then each ground truth entity greedily picks its best unused agent candidate from
     the same table with matching ``is_delete``. We run the greedy pass twice:
     the first builds a UUID mapping from the PK pairings it finds, the second
     re-matches with that mapping so FK columns line up.
@@ -46,16 +46,20 @@ def match_rows(
     Returns ``(matched, missing, extra)``:
 
     * ``matched``: list of ``(gt, agent, similarity)`` tuples
-    * ``missing``: GT entities with no agent counterpart
-    * ``extra``: agent entities not paired to any GT entity
+    * ``missing``: ground truth entities with no agent counterpart
+    * ``extra``: agent entities not paired to any ground truth entity
     """
     comparator = comparator or DatatypeComparator()
     gt_final = _last_write_per_pk(rows_gt)
     agent_final = _last_write_per_pk(rows_a)
 
-    matched, _, _ = _greedy_match(gt_final, agent_final, table_meta, ignored_fields, {}, comparator)
+    matched, _, _ = _greedy_match(
+        gt_final, agent_final, table_meta, ignored_fields, {}, comparator
+    )
     uuid_mapping = _map_uuids(matched)
-    return _greedy_match(gt_final, agent_final, table_meta, ignored_fields, uuid_mapping, comparator)
+    return _greedy_match(
+        gt_final, agent_final, table_meta, ignored_fields, uuid_mapping, comparator
+    )
 
 
 def get_wasted_ops(
@@ -65,7 +69,7 @@ def get_wasted_ops(
     """Return agent op IDs whose only effect was an unmatched create+delete cycle.
 
     An op is wasted if every entity it touched was created and later deleted in
-    the same session without ever matching a GT row.
+    the same session without ever matching a ground truth row.
     """
     wasted_pks = _redundant_pks(rows_a) - matched_pks
 

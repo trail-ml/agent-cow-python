@@ -1,8 +1,7 @@
 """
 Top-level COW session scoring flow.
 
-Implements the pseudocode "flow" section: iterate through agent ops in
-topological order, compute the cumulative struct/content scores at each step,
+Iterate through agent ops in topological order, compute the cumulative struct/content scores at each step,
 record the per-op delta, then layer in efficiency and any user-supplied
 ``score_fns``.
 """

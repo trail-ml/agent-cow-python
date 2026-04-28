@@ -5,7 +5,7 @@
 The module mirrors the structure of [`psudeocode.md`](./psudeocode.md):
 
 - `extraction.py` — pull op IDs, rows, and table metadata from Postgres.
-- `matching.py` — group rows by PK, pair GT with agent, derive UUID mapping, detect wasted ops.
+- `matching.py` — group rows by PK, pair ground truth with agent, derive UUID mapping, detect wasted ops.
 - `compare.py` — `WriteComparator` Protocol and the default `DatatypeComparator` (which accepts per-table overrides).
 - `scores.py` — `struct_score`, `content_score`, `efficiency`.
 - `scorer.py` — the per-op iteration flow plus the public entry points.
@@ -69,9 +69,9 @@ Op IDs on surviving rows are preserved, so the per-op breakdown still makes sens
 ## How it works
 
 1. **Extraction** — rows are read from `*_changes` tables, grouped by `operation_id`, sorted by `_cow_updated_at`.
-2. **Matching** — both sides are reduced to one row per `(table, pk)` (last write wins). Each GT entity greedily picks the best agent entity in the same table with matching `is_delete`. UUID mapping handles the fact that GT and agent create entities with different UUIDs.
+2. **Matching** — both sides are reduced to one row per `(table, pk)` (last write wins). Each ground truth entity greedily picks the best agent entity in the same table with matching `is_delete`. UUID mapping handles the fact that ground truth and agent create entities with different UUIDs.
 3. **Field comparison** — each field is compared by SQL type. Text uses `SequenceMatcher.ratio()`, JSON is deep-equal, everything else is exact. PKs, FKs (compared via UUID mapping), timestamps, and configured `ignored_fields` are skipped for content scoring.
-4. **Per-op flow** — for each agent op in topological order, the cumulative agent rows are re-scored against GT and the delta is recorded in `op_struct_scores`. `op_content_scores` is computed independently from the final matching: each op gets the mean per-field similarity over matched rows whose agent-side write came from it (ops with no matched rows are omitted, so a weighted mean recovers `content_score`).
+4. **Per-op flow** — for each agent op in topological order, the cumulative agent rows are re-scored against ground truth and the delta is recorded in `op_struct_scores`. `op_content_scores` is computed independently from the final matching: each op gets the mean per-field similarity over matched rows whose agent-side write came from it (ops with no matched rows are omitted, so a weighted mean recovers `content_score`).
 5. **Efficiency** — `min(1, gt_ops/agent_ops) * (1 - wasted_ops/agent_ops)`, where a wasted op is one whose only effect was an unmatched create-then-delete cycle.
 6. **Reduce** — registered `score_fns` reduce the `ScoringResult` into entries on `result.scores`.
 
@@ -79,7 +79,7 @@ Op IDs on surviving rows are preserved, so the per-op breakdown still makes sens
 
 The default per-row comparator is `DatatypeComparator`. To override how a specific table compares, pass either:
 
-- `row_similarity={"table_name": fn, ...}` where `fn(gt_row, agent_row) -> bool | float` is the simplest hook. Return `True`/`False`, a graded float in `[0, 1]`, or raise `AssertionError` for assertion-style helpers. Agent FK UUIDs are pre-remapped into GT space so direct `==` works.
+- `row_similarity={"table_name": fn, ...}` where `fn(gt_row, agent_row) -> bool | float` is the simplest hook. Return `True`/`False`, a graded float in `[0, 1]`, or raise `AssertionError` for assertion-style helpers. Agent FK UUIDs are pre-remapped into ground truth space so direct `==` works.
 - `comparator=DatatypeComparator(table_comparators={...})` for full control. Each table comparator implements the `WriteComparator` protocol (one `.compare(gt, agent, table_meta, uuid_mapping, ignored_fields) -> float` method); tables not in the map fall through to datatype-aware comparison.
 
 ```python

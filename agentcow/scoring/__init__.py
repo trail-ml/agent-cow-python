@@ -4,7 +4,7 @@ COW session scoring.
 Mirrors the structure of :mod:`psudeocode.md`:
 
 * :mod:`extraction` — pull rows and table metadata from Postgres.
-* :mod:`matching` — pair GT entities with agent entities (two-pass internally
+* :mod:`matching` — pair ground truth entities with agent entities (two-pass internally
   so FK comparisons line up), and detect wasted ops.
 * :mod:`compare` — ``WriteComparator`` Protocol and the default
   ``DatatypeComparator`` (which accepts per-table overrides).
@@ -37,6 +37,7 @@ from .types import (
     CHANGE_TABLE_RESERVED_FIELDS,
     CowWrite,
     ScoreFn,
+    ScoringCounts,
     ScoringResult,
     TableMeta,
 )
@@ -49,6 +50,7 @@ __all__ = [
     "Executor",
     "RowSimilarityFn",
     "ScoreFn",
+    "ScoringCounts",
     "ScoringResult",
     "TableMeta",
     "WriteComparator",
