@@ -2,13 +2,9 @@
 
 **Database Copy-On-Write for AI agent workspace isolation**
 
-[![PyPI](https://img.shields.io/pypi/v/agent-cow.svg)](https://pypi.org/project/agent-cow/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 `agent-cow` intercepts your AI agent's database writes and isolates them in a copy-on-write layer. The agent thinks it's modifying real data, but nothing touches production until you approve. Zero changes to your existing queries.
-
-> Read the full article: [Copy-on-Write in Agentic Systems](https://www.trail-ml.com/blog/agent-cow)
-> Try the interactive demo: [www.agent-cow.com](https://www.agent-cow.com)
 
 ```
 Without agent-cow:                With agent-cow:
@@ -39,7 +35,7 @@ Requires Python 3.10+.
 
 When you set `app.session_id` and `app.operation_id` variables, all writes go to the changes table. Reads automatically merge base data with your session's changes. Other sessions (and production) see only the base data.
 
-See the [interactive demo](https://www.agent-cow.com) for a worked example of an inventory management system where an agent makes both good and bad decisions.
+See the interactive demo for a worked example of an inventory management system where an agent makes both good and bad decisions.
 
 <details>
 <summary><strong>Why Copy-on-Write for agents?</strong></summary>
@@ -55,8 +51,8 @@ Alignment is an open problem in AI safety, and [misalignment during agent execut
 ## Backends
 | Backend | Docs | Status |
 |---------|------|--------|
-| **PostgreSQL** | [agentcow/postgres](https://github.com/trail-ml/agent-cow-python/tree/main/agentcow/postgres) | Available |
-| **pg-lite (TypeScript)** | [agent-cow-typescript](https://github.com/trail-ml/agent-cow-ts) | Available |
+| **PostgreSQL** | [agentcow/postgres](./agentcow/postgres) | Available |
+| **pg-lite (TypeScript)** | agent-cow-typescript | Available |
 | **Blob/File Storage** | — | In progress |
 
 ## Quick Example (PostgreSQL)
@@ -120,7 +116,7 @@ For parsing COW configuration from HTTP request headers (e.g. in FastAPI/Django/
 ## Development
 
 ```bash
-git clone https://github.com/trail-ml/agent-cow-python.git
+git clone <repository-url>
 cd agent-cow-python
 pip install -e ".[dev]"
 pytest agentcow/postgres/tests/ -v
@@ -128,12 +124,8 @@ pytest agentcow/postgres/tests/ -v
 
 ## Contributing
 
-We welcome contributions! For questions, bug reports, or feature requests, please [open an issue](https://github.com/trail-ml/agent-cow-python/issues).
+We welcome contributions! For questions, bug reports, or feature requests, please open an issue on the repository.
 
 ## License
 
 MIT License.
-
-## Credits
-
-Created and maintained by [trail](https://trail-ml.com).

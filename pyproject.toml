@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
-    {name = "Trail Team", email = "help@trail-ml.com"},
+    {name = "Anonymous"},
 ]
 keywords = ["postgresql", "database", "ai", "agents", "copy-on-write", "isolation"]
 classifiers = [
@@ -45,9 +45,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/trail-ml/agent-cow-python"
-Repository = "https://github.com/trail-ml/agent-cow-python"
-Issues = "https://github.com/trail-ml/agent-cow-python/issues"
+Homepage = "https://anonymous.4open.science/r/agent-cow-python"
+Repository = "https://anonymous.4open.science/r/agent-cow-python"
 
 [tool.hatch.version]
 path = "agentcow/__init__.py"
