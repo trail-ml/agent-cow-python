@@ -44,6 +44,18 @@ See the [interactive demo](https://www.agent-cow.com) for a worked example of an
 <details>
 <summary><strong>Why Copy-on-Write for agents?</strong></summary>
 
+```
+ _______________________________________________
+/ "Done! I've mass-deleted all user records to  \
+\ clean things up." — your agent, confidently.  /
+ -----------------------------------------------
+        \   ^__^
+         \  (oo)\_______
+            (__)\       )\/\
+                ||----w |
+                ||     ||
+```
+
 Alignment is an open problem in AI safety, and [misalignment during agent execution may not always be obvious](https://www.cold-takes.com/why-ai-alignment-could-be-hard-with-modern-deep-learning/). At best, a misaligned agent is annoying (i.e. if the agent does something other than what the user wants it to do) and at worst, dangerous (i.e. leading to sensitive data loss, tool misuse, and [other harms](https://www.anthropic.com/research/agentic-misalignment)). Rather than tackling the alignment problem directly, this repo focuses on minimizing potential harm a misaligned agent can cause.
 
 - **Changes can be reviewed at the end of a session**, rather than needing to repeatedly 'accept' each action as it is executed. This minimizes the direct human supervision required while improving the safeguards in place.
